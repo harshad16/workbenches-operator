@@ -1,0 +1,5 @@
+# Patterns to ignore when packaging chart archives.
+.DS_Store
+*.swp
+*.bak
+*.tmp

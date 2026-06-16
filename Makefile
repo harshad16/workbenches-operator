@@ -1,6 +1,6 @@
 
 # Image URL to use all building/pushing image targets
-IMG ?= quay.io/opendatahub/workbenches-operator:dev
+IMG ?= quay.io/opendatahub/odh-workbenches-operator:odh-stable
 # Container engine to use for building and pushing images (podman or docker)
 CONTAINER_ENGINE ?= podman
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
@@ -67,6 +67,38 @@ unit-test: manifests generate envtest ## Run unit tests (no fmt/vet check).
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+##@ Helm chart
+
+CHART_DIR ?= charts/operator
+
+.PHONY: chart-sync-crd
+chart-sync-crd: manifests ## Copy generated Workbenches CRD into the Helm chart.
+	mkdir -p $(CHART_DIR)/crd
+	cp config/crd/bases/components.platform.opendatahub.io_workbenches.yaml $(CHART_DIR)/crd/workbenches.crd.yaml
+
+.PHONY: helm-lint
+helm-lint: chart-sync-crd ## Lint the operator Helm chart.
+	@if command -v helm >/dev/null 2>&1; then \
+		helm lint $(CHART_DIR); \
+	else \
+		podman run --rm -v "$(CURDIR)/$(CHART_DIR):/chart:Z" docker.io/alpine/helm:3.16.3 lint /chart; \
+	fi
+
+.PHONY: helm-template
+helm-template: chart-sync-crd ## Render the operator Helm chart locally.
+	@if command -v helm >/dev/null 2>&1; then \
+		helm template workbenches-operator $(CHART_DIR) \
+			--namespace workbenches-operator-system \
+			--set image.tag=dev \
+			--set applicationsNamespace=opendatahub; \
+	else \
+		podman run --rm -v "$(CURDIR)/$(CHART_DIR):/chart:Z" docker.io/alpine/helm:3.16.3 \
+			template workbenches-operator /chart \
+			--namespace workbenches-operator-system \
+			--set image.tag=dev \
+			--set applicationsNamespace=opendatahub; \
+	fi
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

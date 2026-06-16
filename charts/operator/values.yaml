@@ -1,0 +1,67 @@
+# Default values for workbenches-operator.
+#
+# The platform orchestrator renders this chart at build time (template-only Helm).
+# It overrides operatorNamespace, applicationsNamespace, image, and relatedImages
+# via ModuleHandler GetOperatorManifests / RelatedImages.
+
+# Namespace where the module operator Deployment and namespace-scoped RBAC live.
+# Platform sets this via ModuleConfig.NamespaceValueKey (typically "operatorNamespace").
+operatorNamespace: workbenches-operator-system
+
+# Shared platform applications namespace (e.g. opendatahub, redhat-ods-applications).
+# Injected as APPLICATIONS_NAMESPACE on the operator pod.
+applicationsNamespace: opendatahub
+
+# Create the operator namespace resource. Must stay false for opendatahub-operator
+# integration (chart compliance allows Deployment/RBAC/CRD only — not Namespace).
+# Set true only for standalone local Helm installs.
+createOperatorNamespace: false
+
+# Prefix applied to operator resource names (matches config/default kustomization).
+namePrefix: workbenches-operator-
+
+replicaCount: 1
+
+image:
+  repository: quay.io/opendatahub/odh-workbenches-operator
+  tag: odh-stable
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  # Becomes {{ namePrefix }}controller-manager when namePrefix is set.
+  name: controller-manager
+
+leaderElection:
+  enabled: true
+
+metrics:
+  bindAddress: ":8443"
+  secure: true
+
+manifests:
+  basePath: /opt/manifests
+
+# Platform injects operand image references at render time (RELATED_IMAGE_* env vars).
+# Keys must be the full environment variable names (RELATED_IMAGE_*).
+relatedImages: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 10m
+    memory: 128Mi
+
+# Additional container environment variables (merged after relatedImages).
+extraEnv: []
+
+# Pod-level securityContext and scheduling passthrough.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
