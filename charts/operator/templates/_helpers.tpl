@@ -94,18 +94,42 @@ Operator container arguments.
 {{- end }}
 
 {{/*
-Container environment variables.
+Manager container image reference.
+
+Resolution order:
+  1. relatedImages[controllerImage.relatedImageEnv] — simulates injectModuleEnv /
+     helm --set for local testing with RELATED_IMAGE_* values
+  2. image.digest — digest-pinned product builds via Helm values
+  3. params.workbenchesOperatorImage — default from params.env
+  4. image.repository:image.tag — fallback
+*/}}
+{{- define "workbenches-operator.image" -}}
+{{- $controllerEnv := .Values.controllerImage.relatedImageEnv -}}
+{{- if and $controllerEnv (index .Values.relatedImages $controllerEnv) -}}
+{{- index .Values.relatedImages $controllerEnv -}}
+{{- else if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else if .Values.params.workbenchesOperatorImage -}}
+{{- .Values.params.workbenchesOperatorImage -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Container environment variables. APPLICATIONS_NAMESPACE is appended last so
+extraEnv cannot override it (Kubernetes uses the last duplicate env name).
 */}}
 {{- define "workbenches-operator.managerEnv" -}}
-- name: APPLICATIONS_NAMESPACE
-  value: {{ .Values.applicationsNamespace | quote }}
+{{- with .Values.extraEnv }}
+{{ toYaml . }}
+{{- end }}
 {{- range $name, $value := .Values.relatedImages }}
 {{- if $value }}
 - name: {{ $name }}
   value: {{ $value | quote }}
 {{- end }}
 {{- end }}
-{{- with .Values.extraEnv }}
-{{ toYaml . }}
-{{- end }}
+- name: APPLICATIONS_NAMESPACE
+  value: {{ .Values.applicationsNamespace | quote }}
 {{- end }}

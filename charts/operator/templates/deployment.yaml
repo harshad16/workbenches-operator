@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "workbenches-operator.deploymentName" . }}
-  namespace: {{ .Values.operatorNamespace }}
+  namespace: {{ .Values.operatorNamespace | quote }}
   labels:
     {{- include "workbenches-operator.labels" . | nindent 4 }}
 spec:
@@ -39,7 +39,7 @@ spec:
             sizeLimit: 256Mi
       containers:
         - name: manager
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "workbenches-operator.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /manager

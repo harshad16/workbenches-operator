@@ -1,8 +1,8 @@
 # Default values for workbenches-operator.
 #
 # The platform orchestrator renders this chart at build time (template-only Helm).
-# It overrides operatorNamespace, applicationsNamespace, image, and relatedImages
-# via ModuleHandler GetOperatorManifests / RelatedImages.
+# It overrides operatorNamespace, applicationsNamespace, and the manager image via
+# ModuleHandler GetOperatorManifests / ControllerImage + injectModuleEnv.
 
 # Namespace where the module operator Deployment and namespace-scoped RBAC live.
 # Platform sets this via ModuleConfig.NamespaceValueKey (typically "operatorNamespace").
@@ -22,10 +22,27 @@ namePrefix: workbenches-operator-
 
 replicaCount: 1
 
+# Default manager image — must stay in sync with params.env key workbenches-operator-image.
+params:
+  workbenchesOperatorImage: quay.io/opendatahub/odh-workbenches-operator:odh-stable
+
+# Manager container image. repository/tag mirror params.env; digest overrides when set.
+# In product builds, opendatahub-operator injectModuleEnv replaces the container image
+# field from ModuleConfig.ControllerImage (RELATED_IMAGE_* on the platform operator).
 image:
   repository: quay.io/opendatahub/odh-workbenches-operator
   tag: odh-stable
+  digest: ""
   pullPolicy: IfNotPresent
+
+# Platform ModuleConfig.ControllerImage — injectModuleEnv overwrites Deployment.spec image.
+controllerImage:
+  relatedImageEnv: RELATED_IMAGE_ODH_WORKBENCHES_OPERATOR_IMAGE
+
+rbac:
+  # Required for SSA of upstream operand ClusterRoles (bind/escalate on named roles).
+  # Disable only when those ClusterRoles are pre-provisioned out-of-band.
+  enableRuntimeEscalation: true
 
 serviceAccount:
   # Becomes {{ namePrefix }}controller-manager when namePrefix is set.
@@ -41,8 +58,9 @@ metrics:
 manifests:
   basePath: /opt/manifests
 
-# Platform injects operand image references at render time (RELATED_IMAGE_* env vars).
-# Keys must be the full environment variable names (RELATED_IMAGE_*).
+# Operand RELATED_IMAGE_* env vars forwarded to the manager pod by the platform.
+# Keys must be full environment variable names (RELATED_IMAGE_*).
+# The manager's own image is NOT listed here — use controllerImage.relatedImageEnv.
 relatedImages: {}
 
 resources:
@@ -53,7 +71,7 @@ resources:
     cpu: 10m
     memory: 128Mi
 
-# Additional container environment variables (merged after relatedImages).
+# Additional container environment variables (merged before APPLICATIONS_NAMESPACE).
 extraEnv: []
 
 # Pod-level securityContext and scheduling passthrough.

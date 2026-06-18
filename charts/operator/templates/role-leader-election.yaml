@@ -2,7 +2,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "workbenches-operator.leaderElectionRoleName" . }}
-  namespace: {{ .Values.operatorNamespace }}
+  namespace: {{ .Values.operatorNamespace | quote }}
   labels:
     {{- include "workbenches-operator.labels" . | nindent 4 }}
 rules:

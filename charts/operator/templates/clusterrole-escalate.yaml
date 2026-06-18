@@ -1,3 +1,4 @@
+{{- if .Values.rbac.enableRuntimeEscalation }}
 # Hand-maintained: escalate and bind scoped to specific upstream manifest resources.
 # Update resourceNames when upstream manifests add/rename ClusterRoles.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -24,3 +25,4 @@ rules:
       - odh-notebook-controller-notebooks-edit
       - odh-notebook-controller-notebooks-view
       - odh-notebook-controller-manager-role
+{{- end }}
