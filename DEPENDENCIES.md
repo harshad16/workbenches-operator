@@ -1,0 +1,109 @@
+# Upgrading Go Version and Dependencies in Workbenches Operator
+
+This guide outlines the steps to upgrade the Go version and dependencies in the Workbenches Operator project.
+
+## Upgrading Go Version
+
+Upgrading the Go version should be done in a separate PR to isolate the changes and make review easier.
+
+> [!IMPORTANT]
+> Images are built in the [ubi9/go-toolset](https://catalog.redhat.com/software/containers/ubi9/go-toolset/61e5c00b4ec9945c18787690) container.
+> It contains a customized FIPS-compatible version of Go, that however lags behind the latest upstream Go version.
+> Always use a Go version that has a supporting go-toolset image available.
+
+1. Begin by reading [Go release notes](https://go.dev/doc/devel/release) to identify potential incompatibilities.
+
+2. Update the Go version in the following files:
+   - `go.mod`: Update the `go` directive at the top of the file.
+   - `Dockerfile`: Update the Go version in the builder stage base image (`ubi9/go-toolset:<version>`).
+
+3. Run the following commands to update and verify the build:
+
+    ```shell
+    go mod tidy
+    make test
+    ```
+
+4. Review CI/CD configuration files that specify a Go version and update them accordingly:
+   - `.github/workflows/` — GitHub Actions workflows (build, test, lint).
+   - `.tekton/` — Konflux/Tekton pipeline definitions.
+
+5. Commit these changes and create a pull request for the Go version upgrade.
+
+   > [!WARNING]
+   > Use the `Manifest List Digest` and not the `Image Digest` when locating sha256 in the Red Hat Image Catalog entry.
+
+## Upgrading Dependencies
+
+Upgrading dependencies can be done separately from the Go version upgrade. However, some dependency upgrades may require a newer Go version.
+
+1. To update all dependencies to their latest minor or patch versions:
+
+    ```shell
+    go get -u ./...
+    ```
+
+    To update to major versions, you'll need to update import paths manually and run `go get` for each updated package.
+
+2. Run `go mod tidy` to clean up the `go.mod` and `go.sum` files, pay attention to not increasing the required Go version, e.g.:
+
+    ```shell
+    go mod tidy -go=1.25.0
+    go: example.com/pkg@v2.0.0 requires go@1.26.0, but 1.25.0 is requested
+    ```
+
+   (The above suggests to either bump the required Go version or to use an older version of the dependency.)
+
+3. Verify that the project still builds and tests pass:
+
+    ```shell
+    make test
+    ```
+
+4. Review the changes in `go.mod` and `go.sum`. Pay special attention to major version upgrades, as they may include breaking changes.
+
+5. If any dependencies require a newer Go version, you may need to upgrade Go first following the steps in the "Upgrading Go Version" section.
+
+6. Commit the changes to `go.mod` and `go.sum`, and create a pull request for the dependency upgrades.
+
+## Upgrading Build Tools
+
+Build tool versions are pinned in the `Makefile`. Update the corresponding version variables when upgrading:
+
+| Tool | Makefile Variable | Current Version |
+|------|-------------------|-----------------|
+| kustomize | `KUSTOMIZE_VERSION` | v5.6.0 |
+| controller-gen | `CONTROLLER_TOOLS_VERSION` | v0.18.0 |
+| setup-envtest | `ENVTEST_VERSION` | release-0.23 |
+| golangci-lint | `GOLANGCI_LINT_VERSION` | v2.12.2 |
+
+After updating a version, remove the old binary from `bin/` to trigger a fresh download:
+
+```shell
+rm -f bin/<tool>*
+make <tool>
+```
+
+## Upgrading Upstream Manifests
+
+The operator bundles upstream component manifests that are fetched at build time via `get_all_manifests.sh`. The manifest sources are defined in the script's `COMPONENT_MANIFESTS` associative array:
+
+| Target | Source Repository | Branch | Source Path |
+|--------|-------------------|--------|-------------|
+| `workbenches/kf-notebook-controller` | `opendatahub-io/kubeflow` | `main` | `components/notebook-controller/config` |
+| `workbenches/odh-notebook-controller` | `opendatahub-io/kubeflow` | `main` | `components/odh-notebook-controller/config` |
+| `workbenches/notebooks` | `opendatahub-io/notebooks` | `main` | `manifests` |
+
+To pin manifests to a specific commit, update the branch field to include a SHA:
+
+```shell
+# Format: org:repo:branch@sha:source_path
+["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:main@abc123def:components/notebook-controller/config"
+```
+
+After modifying manifest sources:
+
+1. Run `make manifests-fetch` to verify the fetch works locally.
+2. Inspect the resulting files in `opt/manifests/` for expected changes.
+3. Run `make test` to ensure the controller still renders manifests correctly.
+4. Commit changes to `get_all_manifests.sh` only (manifests in `opt/` are gitignored).
