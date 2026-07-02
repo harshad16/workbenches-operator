@@ -1,6 +1,6 @@
 
 # Image URL to use all building/pushing image targets
-IMG ?= quay.io/opendatahub/workbenches-operator:dev
+IMG ?= quay.io/opendatahub/odh-workbenches-operator:odh-stable
 # Container engine to use for building and pushing images (podman or docker)
 CONTAINER_ENGINE ?= podman
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
@@ -95,6 +95,56 @@ image-push: ## Push the operator container image to a registry.
 
 .PHONY: image-build-push
 image-build-push: image-build image-push ## Build and push the operator container image.
+
+##@ Helm chart
+
+CHART_DIR ?= charts/operator
+HELM ?= helm
+HELM_RELEASE ?= workbenches-operator
+HELM_NAMESPACE ?= workbenches-operator-system
+APPLICATIONS_NAMESPACE ?= opendatahub
+
+# Shared --set flags for standalone cluster installs (override via make, e.g. APPLICATIONS_NAMESPACE=redhat-ods-applications).
+HELM_DEPLOY_SETS = \
+	--set operatorNamespace=$(HELM_NAMESPACE) \
+	--set applicationsNamespace=$(APPLICATIONS_NAMESPACE) \
+	--set leaderElection.enabled=false \
+	--set params.workbenchesOperatorImage=$(IMG)
+
+.PHONY: chart-sync-crd
+chart-sync-crd: manifests ## Copy generated Workbenches CRD into the Helm chart (generated; not a second source of truth).
+	mkdir -p "$(CHART_DIR)/crd"
+	cp config/crd/bases/components.platform.opendatahub.io_workbenches.yaml "$(CHART_DIR)/crd/workbenches.crd.yaml"
+
+.PHONY: chart-verify-params
+chart-verify-params: ## Verify params.env matches values.yaml default manager image.
+	@test "$$(grep '^workbenches-operator-image=' "$(CHART_DIR)/params.env" | cut -d= -f2-)" = \
+		"$$(grep 'workbenchesOperatorImage:' "$(CHART_DIR)/values.yaml" | awk '{print $$2}')" || \
+		(echo "params.env workbenches-operator-image must match values.params.workbenchesOperatorImage" && exit 1)
+
+.PHONY: helm-lint
+helm-lint: chart-sync-crd chart-verify-params ## Lint the operator Helm chart.
+	$(HELM) lint "$(CHART_DIR)"
+
+.PHONY: helm-template
+helm-template: chart-sync-crd chart-verify-params ## Render the operator Helm chart locally.
+	$(HELM) template "$(HELM_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(HELM_NAMESPACE)" \
+		--set applicationsNamespace=$(APPLICATIONS_NAMESPACE)
+
+.PHONY: helm-deploy
+helm-deploy: chart-sync-crd chart-verify-params ## Deploy operator via Helm (run undeploy first if switching from kustomize).
+	$(HELM) upgrade --install "$(HELM_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(HELM_NAMESPACE)" \
+		--create-namespace \
+		$(HELM_DEPLOY_SETS)
+
+.PHONY: helm-undeploy
+helm-undeploy: ## Uninstall operator Helm release and Workbenches CRD from ~/.kube/config.
+	$(HELM) uninstall "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)" || \
+		{ [ "$(ignore-not-found)" = "true" ] || exit 1; }
+	kubectl delete crd workbenches.components.platform.opendatahub.io --ignore-not-found=$(ignore-not-found)
+
 
 ##@ Deployment
 
