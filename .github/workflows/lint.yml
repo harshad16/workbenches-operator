@@ -72,7 +72,11 @@ jobs:
         run: make manifests
 
       - name: Install kube-linter
-        run: go install golang.stackrox.io/kube-linter/cmd/kube-linter@v0.8.3
+        run: |
+          curl -sSL -o /tmp/kube-linter.tar.gz \
+            "https://github.com/stackrox/kube-linter/releases/download/v0.8.3/kube-linter-linux.tar.gz"
+          tar -xzf /tmp/kube-linter.tar.gz -C /tmp kube-linter
+          sudo mv /tmp/kube-linter /usr/local/bin/kube-linter
 
       - name: Lint Kustomize output
         run: |
