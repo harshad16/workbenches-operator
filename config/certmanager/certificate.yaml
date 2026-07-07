@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/name: workbenches-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: workbenches-operator-webhook-cert
+  namespace: workbenches-operator-system
+spec:
+  dnsNames:
+  - workbenches-operator-webhook-service.workbenches-operator-system.svc
+  - workbenches-operator-webhook-service.workbenches-operator-system.svc.cluster.local
+  issuerRef:
+    kind: ClusterIssuer
+    name: workbenches-operator-selfsigned-issuer
+  secretName: workbenches-operator-controller-webhook-cert

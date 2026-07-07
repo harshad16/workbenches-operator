@@ -35,6 +35,7 @@ import (
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/controller"
+	"github.com/opendatahub-io/workbenches-operator/internal/webhook"
 )
 
 var (
@@ -54,6 +55,7 @@ func main() {
 		probeAddr            string
 		secureMetrics        bool
 		enableHTTP2          bool
+		enableWebhooks       bool
 		manifestsBasePath    string
 	)
 
@@ -67,6 +69,8 @@ func main() {
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers.")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", true,
+		"Enable webhook server for connection injection and hardware profile mutation.")
 	flag.StringVar(&manifestsBasePath, "manifests-base-path", "/opt/manifests",
 		"Base path for component manifests.")
 
@@ -108,6 +112,7 @@ func main() {
 	}
 
 	webhookServer := ctrlwebhook.NewServer(ctrlwebhook.Options{
+		Port:    9443,
 		TLSOpts: tlsOpts,
 	})
 
@@ -131,6 +136,13 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Workbenches")
 		os.Exit(1)
+	}
+
+	if enableWebhooks {
+		if err := webhook.RegisterAllWebhooks(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhooks")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
