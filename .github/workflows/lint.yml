@@ -82,3 +82,57 @@ jobs:
         run: |
           make kustomize
           bin/kustomize build config/default | kube-linter lint -
+
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Lint Helm chart
+        run: make helm-lint
+
+  chart-verify-sync:
+    name: Chart sync verification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Verify Helm chart is in sync with generated config
+        run: make chart-verify-sync
+
+  chart-verify-inventory:
+    name: Chart resource inventory
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Verify kustomize and Helm produce the same resource kinds
+        run: make chart-verify-inventory
