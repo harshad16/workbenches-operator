@@ -93,7 +93,11 @@ make <tool>
 
 ## Upgrading Upstream Manifests
 
-The operator bundles upstream component manifests that are fetched at build time via `get_all_manifests.sh`. The manifest sources are defined in the script's `COMPONENT_MANIFESTS` associative array:
+Upstream component manifests are stored in `opt/manifests/` and committed to the repository. They are refreshed by the scheduled `.github/workflows/manifest-sync.yaml` workflow, which runs `get_all_manifests.sh` daily and opens a PR when content changes. This keeps Konflux container builds hermetic and supports airgapped deployments that cannot reach GitHub at build or runtime.
+
+The manifest-sync workflow needs permission to open PRs. Enable **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**, or configure a `MANIFEST_SYNC_PAT` repository secret (PAT with `repo` scope).
+
+The manifest sources are defined in `get_all_manifests.sh`'s `COMPONENT_MANIFESTS` associative array:
 
 | Target | Source Repository | Branch | Source Path |
 |--------|-------------------|--------|-------------|
@@ -110,7 +114,8 @@ To pin manifests to a specific commit, update the branch field to include a SHA:
 
 After modifying manifest sources:
 
-1. Run `make manifests-fetch` to verify the fetch works locally.
+1. Run `make manifests-fetch` to fetch updated manifests locally.
 2. Inspect the resulting files in `opt/manifests/` for expected changes.
 3. Run `make test` to ensure the controller still renders manifests correctly.
-4. Commit changes to `get_all_manifests.sh` only (manifests in `opt/` are gitignored).
+4. Commit changes to `get_all_manifests.sh` and `opt/manifests/`.
+5. If upstream ClusterRoles changed, sync `config/rbac/rbac_escalate_role.yaml` and `charts/operator/templates/clusterrole-escalate.yaml`.
