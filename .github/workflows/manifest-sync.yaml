@@ -1,0 +1,96 @@
+---
+# Opens a PR when upstream manifests change. Requires one of:
+#   - Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
+#   - Repository secret MANIFEST_SYNC_PAT (PAT with repo scope) when the setting above is disabled
+name: Sync upstream manifests
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch upstream manifests
+        run: bash get_all_manifests.sh
+
+      - uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Validate manifest rendering
+        run: go test ./internal/controller/ -run TestRenderRealManifests -v -count=1
+
+      - name: Commit and open/update PR with GitHub CLI
+        id: sync
+        env:
+          # PAT bypasses org/repo policies that block GITHUB_TOKEN from creating PRs.
+          GH_TOKEN: ${{ secrets.MANIFEST_SYNC_PAT || secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: main
+        run: |
+          set -euo pipefail
+
+          # git diff ignores untracked files (e.g. when opt/manifests was removed from git).
+          if [ -z "$(git status --porcelain -- opt/manifests)" ]; then
+            echo "updated=false" >> "${GITHUB_OUTPUT}"
+            echo "No manifest changes detected."
+            exit 0
+          fi
+
+          echo "updated=true" >> "${GITHUB_OUTPUT}"
+
+          BRANCH="automation/manifest-sync"
+          COMMIT_MSG="chore(manifests): sync upstream component manifests"
+          PR_TITLE="chore(manifests): sync upstream component manifests"
+
+          cat > /tmp/manifest-sync-pr-body.md <<'EOF'
+          Automated sync of upstream component manifests into `opt/manifests/`.
+
+          Manifests are fetched by `get_all_manifests.sh` and committed to the repository so Konflux builds remain hermetic and airgapped clusters do not require network access during image build or operator runtime.
+
+          Review rendered manifest changes and verify RBAC escalate role names in `config/rbac/rbac_escalate_role.yaml` and `charts/operator/templates/clusterrole-escalate.yaml` remain in sync if upstream ClusterRoles changed.
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "${BRANCH}"
+          git add opt/manifests
+          git commit -m "${COMMIT_MSG}"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" "HEAD:refs/heads/${BRANCH}"
+
+          existing_pr_number="$(gh pr list --head "${BRANCH}" --base "${BASE_BRANCH}" --json number --jq '.[0].number // empty')"
+          if [[ -n "${existing_pr_number}" ]]; then
+            gh pr edit "${existing_pr_number}" \
+              --title "${PR_TITLE}" \
+              --body-file /tmp/manifest-sync-pr-body.md
+            gh pr edit "${existing_pr_number}" --add-label "dependencies" 2>/dev/null || true
+          else
+            if ! gh pr create \
+              --base "${BASE_BRANCH}" \
+              --head "${BRANCH}" \
+              --title "${PR_TITLE}" \
+              --body-file /tmp/manifest-sync-pr-body.md \
+              --label "dependencies" 2>/dev/null; then
+              gh pr create \
+                --base "${BASE_BRANCH}" \
+                --head "${BRANCH}" \
+                --title "${PR_TITLE}" \
+                --body-file /tmp/manifest-sync-pr-body.md
+            fi
+          fi

@@ -61,8 +61,5 @@ jobs:
           check-latest: true
           go-version-file: go.mod
 
-      - name: Fetch upstream manifests
-        run: make manifests-fetch
-
       - name: Validate manifest rendering
         run: go test ./internal/controller/ -run TestRenderRealManifests -v -count=1

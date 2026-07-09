@@ -691,8 +691,8 @@ func TestCopyDir(t *testing.T) {
 
 // TestRenderRealManifests validates that the manifest groups for every platform
 // point to directories that exist and can be rendered by kustomize. It runs
-// against the locally fetched manifests (opt/manifests/) and skips if they
-// are not present (e.g. in CI without a prior `make manifests-fetch`).
+// against the committed manifests in opt/manifests/ and skips if they are not
+// present (e.g. before the initial manifest sync).
 func TestRenderRealManifests(t *testing.T) {
 	repoRoot := filepath.Join("..", "..")
 	basePath := filepath.Join(repoRoot, "opt", "manifests")
