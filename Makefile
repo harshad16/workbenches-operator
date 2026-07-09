@@ -116,6 +116,21 @@ chart-sync-crd: manifests ## Copy generated Workbenches CRD into the Helm chart 
 	mkdir -p "$(CHART_DIR)/crd"
 	cp config/crd/bases/components.platform.opendatahub.io_workbenches.yaml "$(CHART_DIR)/crd/workbenches.crd.yaml"
 
+.PHONY: chart-sync-rbac
+chart-sync-rbac: manifests ## Sync generated ClusterRole rules into the Helm chart (generated; not a second source of truth).
+	bash hack/chart-sync-rbac.sh "$(CHART_DIR)"
+
+.PHONY: chart-sync
+chart-sync: chart-sync-crd chart-sync-rbac ## Sync all generated resources into the Helm chart.
+
+.PHONY: chart-verify-sync
+chart-verify-sync: manifests ## Verify Helm chart is in sync with generated config/ artifacts.
+	bash hack/chart-verify-sync.sh "$(CHART_DIR)"
+
+.PHONY: chart-verify-inventory
+chart-verify-inventory: manifests kustomize chart-sync-crd ## Verify kustomize and Helm chart produce the same resource kinds.
+	bash hack/chart-verify-inventory.sh "$(CHART_DIR)"
+
 .PHONY: chart-verify-params
 chart-verify-params: ## Verify params.env matches values.yaml default manager image.
 	@test "$$(grep '^workbenches-operator-image=' "$(CHART_DIR)/params.env" | cut -d= -f2-)" = \
@@ -123,17 +138,17 @@ chart-verify-params: ## Verify params.env matches values.yaml default manager im
 		(echo "params.env workbenches-operator-image must match values.params.workbenchesOperatorImage" && exit 1)
 
 .PHONY: helm-lint
-helm-lint: chart-sync-crd chart-verify-params ## Lint the operator Helm chart.
+helm-lint: chart-sync chart-verify-params ## Lint the operator Helm chart.
 	$(HELM) lint "$(CHART_DIR)"
 
 .PHONY: helm-template
-helm-template: chart-sync-crd chart-verify-params ## Render the operator Helm chart locally.
+helm-template: chart-sync chart-verify-params ## Render the operator Helm chart locally.
 	$(HELM) template "$(HELM_RELEASE)" "$(CHART_DIR)" \
 		--namespace "$(HELM_NAMESPACE)" \
 		--set applicationsNamespace=$(APPLICATIONS_NAMESPACE)
 
 .PHONY: helm-deploy
-helm-deploy: chart-sync-crd chart-verify-params ## Deploy operator via Helm (run undeploy first if switching from kustomize).
+helm-deploy: chart-sync chart-verify-params ## Deploy operator via Helm (run undeploy first if switching from kustomize).
 	$(HELM) upgrade --install "$(HELM_RELEASE)" "$(CHART_DIR)" \
 		--namespace "$(HELM_NAMESPACE)" \
 		--create-namespace \
@@ -141,8 +156,11 @@ helm-deploy: chart-sync-crd chart-verify-params ## Deploy operator via Helm (run
 
 .PHONY: helm-undeploy
 helm-undeploy: ## Uninstall operator Helm release and Workbenches CRD from ~/.kube/config.
-	$(HELM) uninstall "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)" || \
-		{ [ "$(ignore-not-found)" = "true" ] || exit 1; }
+	@if $(HELM) status "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)" >/dev/null 2>&1; then \
+		$(HELM) uninstall "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)"; \
+	else \
+		echo "Release $(HELM_RELEASE) not found in namespace $(HELM_NAMESPACE) — skipping uninstall"; \
+	fi
 	kubectl delete crd workbenches.components.platform.opendatahub.io --ignore-not-found=$(ignore-not-found)
 
 
