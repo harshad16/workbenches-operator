@@ -18,11 +18,14 @@ limitations under the License.
 package main
 
 import (
-	"crypto/tls"
+	"context"
 	"errors"
 	"flag"
 	"os"
+	"time"
 
+	configv1 "github.com/openshift/api/config/v1"
+	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -39,6 +42,7 @@ import (
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/controller"
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
+	"github.com/opendatahub-io/workbenches-operator/internal/tlsconfig"
 	"github.com/opendatahub-io/workbenches-operator/internal/webhook"
 )
 
@@ -50,6 +54,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(configv1.Install(scheme))
 }
 
 func main() {
@@ -97,18 +102,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	var tlsOpts []func(*tls.Config)
+	// Bootstrap TLS configuration from the cluster's APIServer TLS profile (OpenShift only).
+	restCfg := ctrl.GetConfigOrDie()
+	bootstrapClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create bootstrap client for TLS profile")
+		os.Exit(1)
+	}
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, func(c *tls.Config) {
-			c.NextProtos = []string{"http/1.1"}
-		})
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	tlsResult, err := tlsconfig.Bootstrap(bootstrapCtx, bootstrapClient, enableHTTP2, tlsconfig.DefaultFetcher())
+	bootstrapCancel()
+	if err != nil {
+		setupLog.Error(err, "unable to read APIServer TLS profile, refusing to start with unknown TLS posture")
+		os.Exit(1)
+	}
+
+	if !tlsResult.HasOpenShiftConfigAPI {
+		setupLog.Info("TLS profile not available, using hardened defaults (non-OpenShift cluster)")
+	} else if len(tlsResult.UnsupportedCiphers) > 0 {
+		setupLog.Info("some ciphers from TLS profile are not supported by Go", "unsupported", tlsResult.UnsupportedCiphers)
 	}
 
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
+		TLSOpts:       tlsResult.TLSOpts,
 	}
 
 	if secureMetrics {
@@ -117,7 +136,7 @@ func main() {
 
 	webhookServer := ctrlwebhook.NewServer(ctrlwebhook.Options{
 		Port:    9443,
-		TLSOpts: tlsOpts,
+		TLSOpts: tlsResult.TLSOpts,
 	})
 
 	applicationsNamespace := os.Getenv("APPLICATIONS_NAMESPACE")
@@ -147,7 +166,7 @@ func main() {
 		},
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
+	mgr, err := ctrl.NewManager(restCfg, mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -180,10 +199,38 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register SecurityProfileWatcher on OpenShift: cancel context on TLS profile change so pod restarts.
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+
+	if tlsResult.HasOpenShiftConfigAPI {
+		watcher := &tlspkg.SecurityProfileWatcher{
+			Client:                mgr.GetClient(),
+			InitialTLSProfileSpec: tlsResult.Profile,
+			OnProfileChange: func(_ context.Context, _, _ configv1.TLSProfileSpec) {
+				setupLog.Info("TLS profile changed, initiating graceful shutdown to reload")
+				cancel()
+			},
+		}
+		if tlsResult.TLSAdherenceFetched {
+			watcher.InitialTLSAdherencePolicy = tlsResult.TLSAdherence
+			watcher.OnAdherencePolicyChange = func(_ context.Context, _, _ configv1.TLSAdherencePolicy) {
+				setupLog.Info("TLS adherence policy changed, initiating shutdown to reload")
+				cancel()
+			}
+		}
+		if err := watcher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register TLS security profile watcher")
+			cancel()
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("starting manager")
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
+		cancel()
 		os.Exit(1)
 	}
+	cancel()
 }
