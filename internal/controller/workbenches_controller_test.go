@@ -161,6 +161,22 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(releaseCond.Reason).To(Equal("ReleaseMetadataFailed"))
 		})
 
+		It("Should set phase=Initializing when deployments are not yet available", func() {
+			nsName := "test-ns-no-deploys"
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Phase).To(Equal("Initializing"))
+		})
+
 		It("Should set DeploymentsAvailable=False when no deployments exist", func() {
 			nsName := "test-ns-no-deploys"
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
@@ -181,10 +197,104 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(deplCond.Reason).To(Equal("Unavailable"))
 		})
 
+		It("Should set phase=Upgrading after a spec change when previously ready", func() {
+			nsName := "test-ns-upgrading"
+			createNamespace(nsName)
+			createDeployment(nsName, "odh-notebook-controller", 1, 1)
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			ready := getWorkbenches(wb.Name)
+			Expect(ready.Status.Phase).To(Equal("Ready"))
+
+			ready.Spec.GatewayDomain = "gateway.example.com"
+			Expect(k8sClient.Update(ctx, ready)).To(Succeed())
+
+			updateDeploymentReplicas(nsName, "odh-notebook-controller", 1, 0)
+
+			_, err = reconciler.Reconcile(ctx, requestFor(ready))
+			Expect(err).NotTo(HaveOccurred())
+
+			upgrading := getWorkbenches(wb.Name)
+			Expect(upgrading.Status.Phase).To(Equal("Upgrading"))
+		})
+
+		It("Should set phase=Degraded when deployments regress after being ready", func() {
+			nsName := "test-ns-degraded"
+			createNamespace(nsName)
+			createDeployment(nsName, "odh-notebook-controller", 1, 1)
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			ready := getWorkbenches(wb.Name)
+			Expect(ready.Status.Phase).To(Equal("Ready"))
+
+			updateDeploymentReplicas(nsName, "odh-notebook-controller", 1, 0)
+
+			_, err = reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Phase).To(Equal("Degraded"))
+
+			degradedCond := meta.FindStatusCondition(updated.Status.Conditions, "Degraded")
+			Expect(degradedCond).NotTo(BeNil())
+			Expect(degradedCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("Should treat deployment scaled to zero as unavailable", func() {
+			nsName := "test-ns-scaled-zero"
+			createNamespace(nsName)
+			createDeployment(nsName, "odh-notebook-controller", 1, 1)
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getWorkbenches(wb.Name).Status.Phase).To(Equal("Ready"))
+
+			updateDeploymentReplicas(nsName, "odh-notebook-controller", 0, 0)
+
+			_, err = reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Phase).To(Equal("Degraded"))
+
+			deplCond := meta.FindStatusCondition(updated.Status.Conditions, "DeploymentsAvailable")
+			Expect(deplCond).NotTo(BeNil())
+			Expect(deplCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(deplCond.Message).To(ContainSubstring("scaled to zero"))
+		})
+
 		It("Should set Ready=True when deployments are available", func() {
 			nsName := "test-ns-ready"
 			createNamespace(nsName)
-			createDeployment(nsName, "odh-notebook-controller", 1)
+			createDeployment(nsName, "odh-notebook-controller", 1, 1)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -287,7 +397,7 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(result).To(Equal(ctrl.Result{}))
 
 			updated := getWorkbenches(wb.Name)
-			Expect(updated.Status.Phase).To(Equal("Not Ready"))
+			Expect(updated.Status.Phase).To(Equal("Failed"))
 
 			readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
 			Expect(readyCond).NotTo(BeNil())
@@ -305,7 +415,7 @@ var _ = Describe("Workbenches Controller", func() {
 		It("Should clean up labeled resources when transitioning to Removed", func() {
 			nsName := "test-ns-removed-cleanup"
 			createNamespace(nsName)
-			createDeployment(nsName, "notebook-controller", 1)
+			createDeployment(nsName, "notebook-controller", 1, 1)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -337,7 +447,7 @@ var _ = Describe("Workbenches Controller", func() {
 
 			// Verify status is set correctly
 			final := getWorkbenches(wb.Name)
-			Expect(final.Status.Phase).To(Equal("Not Ready"))
+			Expect(final.Status.Phase).To(Equal("Failed"))
 		})
 	})
 
@@ -371,7 +481,7 @@ var _ = Describe("Workbenches Controller", func() {
 		It("Should clean up labeled resources and remove finalizer on deletion", func() {
 			nsName := "test-ns-finalizer-del"
 			createNamespace(nsName)
-			createDeployment(nsName, "notebook-controller-deployment", 1)
+			createDeployment(nsName, "notebook-controller-deployment", 1, 1)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -407,7 +517,7 @@ var _ = Describe("Workbenches Controller", func() {
 		It("Should skip cleanup and complete deletion when finalizer is absent", func() {
 			nsName := "test-ns-no-finalizer"
 			createNamespace(nsName)
-			createDeployment(nsName, "should-survive", 1)
+			createDeployment(nsName, "should-survive", 1, 1)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -497,7 +607,7 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(result).To(Equal(ctrl.Result{}))
 
 			final := getWorkbenches(wb.Name)
-			Expect(final.Status.Phase).To(Equal("Not Ready"))
+			Expect(final.Status.Phase).To(Equal("Failed"))
 
 			readyCond := meta.FindStatusCondition(final.Status.Conditions, "Ready")
 			Expect(readyCond).NotTo(BeNil())
@@ -542,7 +652,7 @@ func createNamespace(name string) {
 	ExpectWithOffset(1, k8sClient.Create(ctx, ns)).To(Succeed())
 }
 
-func createDeployment(namespace, name string, readyReplicas int32) {
+func createDeployment(namespace, name string, specReplicas, readyReplicas int32) {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -553,7 +663,7 @@ func createDeployment(namespace, name string, readyReplicas int32) {
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](1),
+			Replicas: ptr.To(specReplicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": name},
 			},
@@ -572,7 +682,20 @@ func createDeployment(namespace, name string, readyReplicas int32) {
 	ExpectWithOffset(1, k8sClient.Create(ctx, deploy)).To(Succeed())
 
 	deploy.Status.ReadyReplicas = readyReplicas
-	deploy.Status.Replicas = 1
+	deploy.Status.Replicas = specReplicas
+	deploy.Status.AvailableReplicas = readyReplicas
+	ExpectWithOffset(1, k8sClient.Status().Update(ctx, deploy)).To(Succeed())
+}
+
+func updateDeploymentReplicas(namespace, name string, specReplicas, readyReplicas int32) {
+	deploy := &appsv1.Deployment{}
+	ExpectWithOffset(1, k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, deploy)).To(Succeed())
+
+	deploy.Spec.Replicas = ptr.To(specReplicas)
+	ExpectWithOffset(1, k8sClient.Update(ctx, deploy)).To(Succeed())
+
+	deploy.Status.ReadyReplicas = readyReplicas
+	deploy.Status.Replicas = specReplicas
 	deploy.Status.AvailableReplicas = readyReplicas
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, deploy)).To(Succeed())
 }
