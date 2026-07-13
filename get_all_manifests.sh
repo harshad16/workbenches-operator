@@ -3,6 +3,8 @@ set -euo pipefail
 
 # Workbenches module operator manifest fetching script.
 # Downloads manifests from upstream component repositories into opt/manifests/.
+# Manifests are committed to the repository for hermetic container builds.
+# A scheduled GitHub Action (.github/workflows/manifest-sync.yaml) refreshes them daily.
 #
 # Usage:
 #   ./get_all_manifests.sh [--workbenches/kf-notebook-controller=org:repo:branch@sha:source_path]

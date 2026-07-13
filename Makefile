@@ -31,7 +31,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests-fetch
-manifests-fetch: ## Fetch upstream component manifests into opt/manifests/ for local development.
+manifests-fetch: ## Fetch upstream component manifests into opt/manifests/ (for local dev or manual sync).
 	bash get_all_manifests.sh
 
 .PHONY: manifests
@@ -87,6 +87,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: image-build
 image-build: ## Build the operator container image.
+	test -d opt/manifests || (echo "opt/manifests missing — run 'make manifests-fetch'" && exit 1)
 	"$(CONTAINER_ENGINE)" build -t "$(IMG)" .
 
 .PHONY: image-push
