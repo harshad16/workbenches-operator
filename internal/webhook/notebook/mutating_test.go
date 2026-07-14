@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/onsi/gomega"
 	"gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -34,8 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-
-	. "github.com/onsi/gomega"
 
 	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
@@ -211,7 +210,7 @@ func TestNotebookWebhook_Handle_BasicValidation(t *testing.T) {
 		{
 			name: "invalid annotation format - empty name",
 			annotations: map[string]string{
-				metadata.ConnectionAnnotation: fmt.Sprintf("%s/", testNamespace),
+				metadata.ConnectionAnnotation: testNamespace + "/",
 			},
 			expectedAllowed:    false,
 			expectedMessage:    "failed to parse connections annotation",
@@ -220,7 +219,7 @@ func TestNotebookWebhook_Handle_BasicValidation(t *testing.T) {
 		{
 			name: "invalid annotation format - empty namespace",
 			annotations: map[string]string{
-				metadata.ConnectionAnnotation: fmt.Sprintf("/%s", testSecret1),
+				metadata.ConnectionAnnotation: "/" + testSecret1,
 			},
 			expectedAllowed:    false,
 			expectedMessage:    "failed to parse connections annotation",
