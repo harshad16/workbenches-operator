@@ -17,7 +17,9 @@ limitations under the License.
 package hardwareprofile_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -31,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
@@ -67,9 +71,10 @@ func createInjector(t *testing.T, s *runtime.Scheme, objects ...runtime.Object) 
 	cli := builder.Build()
 
 	return &hardwareprofile.Injector{
-		Client:  cli,
-		Decoder: admission.NewDecoder(s),
-		Name:    "test",
+		Client:      cli,
+		EventWriter: cli,
+		Decoder:     admission.NewDecoder(s),
+		Name:        "test",
 	}
 }
 
@@ -1689,6 +1694,117 @@ func TestHardwareProfile_NonStringKueueValueDenied(t *testing.T) {
 
 	g.Expect(resp.Allowed).Should(BeFalse(), "Should deny when localQueueName is not a string")
 	g.Expect(resp.Result.Message).Should(ContainSubstring("localQueueName"))
+}
+
+func TestHardwareProfile_ContainerNameMismatchEmitsEvent(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	containers := []any{
+		map[string]any{"name": "container-a", "image": "notebook:latest", "resources": map[string]any{}},
+		map[string]any{"name": "container-b", "image": "oauth-proxy:latest", "resources": map[string]any{}},
+	}
+	_ = unstructured.SetNestedSlice(nb.Object, containers, "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty())
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("rename your container to '"+testNotebook+"'"),
+		"Warning should include rename hint")
+
+	events := &corev1.EventList{}
+	g.Expect(injector.Client.List(t.Context(), events,
+		client.InNamespace(testNamespace))).Should(Succeed())
+
+	g.Expect(events.Items).Should(HaveLen(1))
+	event := events.Items[0]
+	g.Expect(event.Reason).Should(Equal("ContainerNameMismatch"))
+	g.Expect(event.Type).Should(Equal(corev1.EventTypeWarning))
+	g.Expect(event.Message).Should(ContainSubstring(testHardwareProfile))
+	g.Expect(event.Message).Should(ContainSubstring(testNotebook))
+	g.Expect(event.InvolvedObject.Name).Should(Equal(testNotebook))
+	g.Expect(event.InvolvedObject.Namespace).Should(Equal(testNamespace))
+}
+
+func TestHardwareProfile_ValidationErrorEmitsEvent(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	// Set containers to an invalid structure to trigger a non-mismatch validation error
+	_ = unstructured.SetNestedField(nb.Object, "not-a-slice", "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty())
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("validation error"))
+
+	events := &corev1.EventList{}
+	g.Expect(injector.Client.List(t.Context(), events,
+		client.InNamespace(testNamespace))).Should(Succeed())
+
+	g.Expect(events.Items).Should(HaveLen(1))
+	event := events.Items[0]
+	g.Expect(event.Reason).Should(Equal("ValidationError"))
+	g.Expect(event.Type).Should(Equal(corev1.EventTypeWarning))
+	g.Expect(event.Message).Should(ContainSubstring(testHardwareProfile))
+	g.Expect(event.InvolvedObject.Name).Should(Equal(testNotebook))
+	g.Expect(event.InvolvedObject.Namespace).Should(Equal(testNamespace))
+}
+
+func TestHardwareProfile_EventCreationFailureDoesNotBlockAdmission(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	// Create injector with a client that will reject event creation
+	cli := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(hwp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isEvent := obj.(*corev1.Event); isEvent {
+					return errors.New("simulated event creation failure")
+				}
+
+				return c.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	injector := &hardwareprofile.Injector{
+		Client:      cli,
+		EventWriter: cli,
+		Decoder:     admission.NewDecoder(s),
+		Name:        "test",
+	}
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	containers := []any{
+		map[string]any{"name": "container-a", "image": "notebook:latest", "resources": map[string]any{}},
+		map[string]any{"name": "container-b", "image": "oauth-proxy:latest", "resources": map[string]any{}},
+	}
+	_ = unstructured.SetNestedSlice(nb.Object, containers, "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue(), "Admission must succeed even if event creation fails")
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty(), "Warning should still be present")
 }
 
 func TestParseQuantityValue(t *testing.T) {
