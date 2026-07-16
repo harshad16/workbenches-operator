@@ -38,7 +38,7 @@ spec:
         args:
         - --leader-elect
         - --health-probe-bind-address=:8081
-        image: controller:latest
+        image: controller:dev
         imagePullPolicy: Always
         name: manager
         securityContext:
@@ -51,6 +51,12 @@ spec:
         - containerPort: 8443
           name: https
           protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        env:
+        - name: APPLICATIONS_NAMESPACE
+          value: opendatahub
         livenessProbe:
           httpGet:
             path: /healthz
@@ -63,6 +69,9 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         resources:
           limits:
             cpu: 500m
@@ -70,5 +79,9 @@ spec:
           requests:
             cpu: 10m
             memory: 128Mi
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 256Mi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

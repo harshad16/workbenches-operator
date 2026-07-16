@@ -1,0 +1,138 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, stable, v1.x]
+  pull_request:
+    branches: [main, stable, v1.x]
+  workflow_dispatch:
+
+jobs:
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Generate code
+        run: make generate
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          only-new-issues: true
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Generate code
+        run: make generate
+
+      - name: Run go vet
+        run: go vet ./...
+
+  kube-linter:
+    name: kube-linter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Generate manifests
+        run: make manifests
+
+      - name: Install kube-linter
+        run: |
+          curl -sSL -o /tmp/kube-linter.tar.gz \
+            "https://github.com/stackrox/kube-linter/releases/download/v0.8.3/kube-linter-linux.tar.gz"
+          tar -xzf /tmp/kube-linter.tar.gz -C /tmp kube-linter
+          sudo mv /tmp/kube-linter /usr/local/bin/kube-linter
+
+      - name: Lint Kustomize output
+        run: |
+          make kustomize
+          bin/kustomize build config/default | kube-linter lint -
+
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Lint Helm chart
+        run: make helm-lint
+
+  chart-verify-sync:
+    name: Chart sync verification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Verify Helm chart is in sync with generated config
+        run: make chart-verify-sync
+
+  chart-verify-inventory:
+    name: Chart resource inventory
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Verify kustomize and Helm produce the same resource kinds
+        run: make chart-verify-inventory
