@@ -23,7 +23,7 @@ import (
 // Workbenches component constants.
 const (
 	WorkbenchesComponentName = "workbenches"
-	WorkbenchesInstanceName  = "default"
+	WorkbenchesInstanceName  = "default-" + WorkbenchesComponentName
 	WorkbenchesKind          = "Workbenches"
 )
 
@@ -69,9 +69,9 @@ type WorkbenchesSpec struct {
 type ComponentRelease struct {
 	// +required
 	// +kubebuilder:validation:Required
-	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
-	RepoURL string `json:"repoUrl,omitempty"`
+	Name    string `json:"name"              yaml:"name"`
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+	RepoURL string `json:"repoUrl,omitempty" yaml:"repoUrl,omitempty"`
 }
 
 // WorkbenchesStatus defines the observed state of Workbenches.
@@ -91,7 +91,8 @@ type WorkbenchesStatus struct {
 	// observedGeneration is the most recent generation observed by the controller.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase is the overall phase of the component ("Ready" or "Not Ready").
+	// phase is the overall lifecycle phase of the component.
+	// +kubebuilder:validation:Enum=Pending;Initializing;Ready;Upgrading;Degraded;Failed
 	Phase string `json:"phase,omitempty"`
 
 	// workbenchNamespace reflects the active workbench namespace.
@@ -101,7 +102,7 @@ type WorkbenchesStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
-// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'default'",message="Workbenches name must be default"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'default-workbenches'",message="Workbenches name must be default-workbenches"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready"
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`,description="Reason"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`,description="Phase"
