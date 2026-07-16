@@ -1,0 +1,19 @@
+# Vanilla Kubernetes overlay using cert-manager for TLS.
+# Requires cert-manager to be installed on the cluster.
+# For OpenShift clusters, use config/default/ instead.
+resources:
+- ../base
+- selfsigned-issuer.yaml
+- certificate.yaml
+
+patches:
+# Add cert-manager CA injection annotation to the MutatingWebhookConfiguration
+- target:
+    kind: MutatingWebhookConfiguration
+  patch: |
+    - op: add
+      path: /metadata/annotations
+      value: {}
+    - op: add
+      path: /metadata/annotations/cert-manager.io~1inject-ca-from
+      value: workbenches-operator-system/workbenches-operator-webhook-cert

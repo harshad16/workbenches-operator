@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  labels:
+    app.kubernetes.io/name: workbenches-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: workbenches-operator-selfsigned-issuer
+spec:
+  selfSigned: {}
