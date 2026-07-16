@@ -1,0 +1,12 @@
+# Patterns to ignore when packaging chart archives.
+.DS_Store
+*.swp
+*.bak
+*.tmp
+README.md
+LICENSE
+Makefile
+params.env
+*.md
+ci/
+tests/

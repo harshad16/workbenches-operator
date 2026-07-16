@@ -1,11 +1,8 @@
-namespace: workbenches-operator-system
-
-namePrefix: workbenches-operator-
-
+# OpenShift-specific overlay. Requires OpenShift's service-CA controller.
+# For vanilla Kubernetes clusters, use config/certmanager/ instead.
 resources:
-- ../crd
-- ../rbac
-- ../manager
+- ../base
 
 patches:
-- path: manager_deployment_patch.yaml
+- path: webhook_openshift_patch.yaml
+- path: webhookconfig_openshift_patch.yaml
