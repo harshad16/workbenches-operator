@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -29,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -139,9 +141,18 @@ func main() {
 		TLSOpts: tlsResult.TLSOpts,
 	})
 
-	applicationsNamespace := os.Getenv("APPLICATIONS_NAMESPACE")
-	if applicationsNamespace == "" {
+	providedApplicationsNamespace := strings.TrimSpace(os.Getenv("APPLICATIONS_NAMESPACE"))
+	applicationsNamespace := providedApplicationsNamespace
+	if applicationsNamespace == "" || len(validation.IsDNS1123Label(applicationsNamespace)) > 0 {
 		applicationsNamespace = platform.DefaultNotebooksNamespaceODH
+		if providedApplicationsNamespace == "" {
+			setupLog.Info("APPLICATIONS_NAMESPACE not set; using default",
+				"default", applicationsNamespace)
+		} else {
+			setupLog.Info("APPLICATIONS_NAMESPACE invalid; using default",
+				"provided", providedApplicationsNamespace,
+				"default", applicationsNamespace)
+		}
 	}
 
 	mgrOptions := ctrl.Options{

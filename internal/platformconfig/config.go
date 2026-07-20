@@ -21,10 +21,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
@@ -50,7 +53,15 @@ const (
 	DistributionNameStandalone = "Standalone"
 
 	// DistributionNameSelfManagedRHOAI is the platform distribution name for RHOAI.
+	// Note: this differs from platform.SelfManagedRhoai ("SelfManagedRhoai") which is the
+	// projected spec.platform value; distribution status uses the RHOAI product spelling.
 	DistributionNameSelfManagedRHOAI = "SelfManagedRHOAI"
+
+	// maxDistributionFieldLength matches the CRD MaxLength on status.distribution fields.
+	maxDistributionFieldLength = 64
+
+	// maxLoggedPlatformLength bounds untrusted spec.platform values written to logs.
+	maxLoggedPlatformLength = 128
 )
 
 // ReadDesiredDistribution returns distribution.name and distribution.version from
@@ -79,9 +90,15 @@ func ReadDesiredDistribution(
 		return componentsv1alpha1.Distribution{}, nil
 	}
 
+	name := strings.TrimSpace(cm.Data[DistributionNameKey])
+	version := strings.TrimSpace(cm.Data[DistributionVersionKey])
+	if err := validateDistributionFields(name, version); err != nil {
+		return componentsv1alpha1.Distribution{}, fmt.Errorf("invalid distribution in ConfigMap %s/%s: %w", namespace, ConfigMapName, err)
+	}
+
 	return componentsv1alpha1.Distribution{
-		Name:    strings.TrimSpace(cm.Data[DistributionNameKey]),
-		Version: strings.TrimSpace(cm.Data[DistributionVersionKey]),
+		Name:    name,
+		Version: version,
 	}, nil
 }
 
@@ -122,7 +139,7 @@ func DistributionAligned(desired, current componentsv1alpha1.Distribution) bool 
 // StandaloneDistribution returns the distribution status for clusters without platform management.
 func StandaloneDistribution(operatorVersion string) componentsv1alpha1.Distribution {
 	version := strings.TrimSpace(operatorVersion)
-	if version == "" {
+	if version == "" || validateDistributionVersion(version) != nil {
 		version = "0.0.0"
 	}
 
@@ -151,10 +168,18 @@ func ResolveDesiredDistribution(
 	if desired.Name == "" && specPlatform != "" {
 		// Prefer ConfigMap values; only derive the name from spec.platform when distribution.name is absent.
 		desired.Name = DistributionNameFromPlatform(specPlatform)
+		if desired.Name == "" {
+			log.Log.Info("unrecognized spec.platform; ignoring for distribution name mapping",
+				"platform", truncateForLog(specPlatform, maxLoggedPlatformLength))
+		}
 	}
 
 	if desired.Name == "" {
 		desired.Name = StandaloneDistribution(operatorVersion).Name
+	}
+
+	if desired.Version == "" {
+		desired.Version = StandaloneDistribution(operatorVersion).Version
 	}
 
 	return desired
@@ -168,8 +193,51 @@ func DistributionNameFromPlatform(specPlatform string) string {
 	case platform.OpenDataHub:
 		return platform.OpenDataHub
 	default:
-		return specPlatform
+		return ""
 	}
+}
+
+func validateDistributionFields(name, version string) error {
+	if name != "" {
+		switch name {
+		case platform.OpenDataHub, DistributionNameSelfManagedRHOAI, DistributionNameStandalone:
+		default:
+			return fmt.Errorf("unsupported distribution.name %q", name)
+		}
+	}
+
+	if err := validateDistributionVersion(version); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateDistributionVersion(value string) error {
+	if value == "" {
+		return nil
+	}
+
+	if utf8.RuneCountInString(value) > maxDistributionFieldLength {
+		return fmt.Errorf("%s exceeds max length %d", DistributionVersionKey, maxDistributionFieldLength)
+	}
+
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s contains control characters", DistributionVersionKey)
+		}
+	}
+
+	return nil
+}
+
+func truncateForLog(value string, maxRunes int) string {
+	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+
+	runes := []rune(value)
+	return string(runes[:maxRunes]) + "..."
 }
 
 // GetPlatformRelease returns the platform handshake entry from status.releases.

@@ -18,6 +18,7 @@ package platformconfig
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -140,6 +141,11 @@ func TestStandaloneDistribution(t *testing.T) {
 	if got.Name != DistributionNameStandalone || got.Version != "1.2.3" {
 		t.Fatalf("StandaloneDistribution(\"1.2.3\") = %#v", got)
 	}
+
+	got = StandaloneDistribution("1.2.3\nspoofed")
+	if got.Name != DistributionNameStandalone || got.Version != "0.0.0" {
+		t.Fatalf("StandaloneDistribution(control chars) = %#v, want Standalone/0.0.0", got)
+	}
 }
 
 func TestResolveDesiredDistribution(t *testing.T) {
@@ -166,6 +172,117 @@ func TestResolveDesiredDistribution(t *testing.T) {
 	)
 	if versionOnly.Name != DistributionNameStandalone || versionOnly.Version != "3.5.1" {
 		t.Fatalf("ResolveDesiredDistribution() version-only = %#v", versionOnly)
+	}
+
+	nameOnly := ResolveDesiredDistribution(
+		componentsv1alpha1.Distribution{Name: platform.OpenDataHub},
+		"",
+		"",
+	)
+	if nameOnly.Name != platform.OpenDataHub || nameOnly.Version != "0.0.0" {
+		t.Fatalf("ResolveDesiredDistribution() name-only = %#v", nameOnly)
+	}
+}
+
+func TestDistributionNameFromPlatform(t *testing.T) {
+	t.Parallel()
+
+	if got := DistributionNameFromPlatform(platform.OpenDataHub); got != platform.OpenDataHub {
+		t.Fatalf("DistributionNameFromPlatform(OpenDataHub) = %q", got)
+	}
+
+	if got := DistributionNameFromPlatform(platform.SelfManagedRhoai); got != DistributionNameSelfManagedRHOAI {
+		t.Fatalf("DistributionNameFromPlatform(SelfManagedRhoai) = %q", got)
+	}
+
+	if got := DistributionNameFromPlatform("unknown-platform"); got != "" {
+		t.Fatalf("DistributionNameFromPlatform(unknown) = %q, want empty", got)
+	}
+}
+
+func TestTruncateForLog(t *testing.T) {
+	t.Parallel()
+
+	if got := truncateForLog("short", 128); got != "short" {
+		t.Fatalf("truncateForLog(short) = %q", got)
+	}
+
+	long := strings.Repeat("a", maxLoggedPlatformLength+10)
+	got := truncateForLog(long, maxLoggedPlatformLength)
+	want := strings.Repeat("a", maxLoggedPlatformLength) + "..."
+	if got != want {
+		t.Fatalf("truncateForLog(long) = %q, want truncated", got)
+	}
+}
+
+func TestValidateDistributionValueRuneLength(t *testing.T) {
+	t.Parallel()
+
+	// 64 multi-byte runes should be accepted (CRD MaxLength is character-based).
+	ok := strings.Repeat("é", maxDistributionFieldLength)
+	if err := validateDistributionVersion(ok); err != nil {
+		t.Fatalf("validateDistributionVersion(64 runes) error = %v", err)
+	}
+
+	tooLong := strings.Repeat("é", maxDistributionFieldLength+1)
+	if err := validateDistributionVersion(tooLong); err == nil {
+		t.Fatal("validateDistributionVersion(65 runes) error = nil, want max length error")
+	}
+}
+
+func TestReadDesiredDistributionInvalid(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		data map[string]string
+	}{
+		{
+			name: "unsupported distribution name",
+			data: map[string]string{
+				DistributionNameKey:    "NotARealDistribution",
+				DistributionVersionKey: "1.0.0",
+			},
+		},
+		{
+			name: "control characters in version",
+			data: map[string]string{
+				DistributionNameKey:    platform.OpenDataHub,
+				DistributionVersionKey: "1.0.0\nmalicious",
+			},
+		},
+		{
+			name: "oversized version",
+			data: map[string]string{
+				DistributionNameKey:    platform.OpenDataHub,
+				DistributionVersionKey: strings.Repeat("a", maxDistributionFieldLength+1),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ConfigMapName,
+					Namespace: "opendatahub",
+				},
+				Data: tt.data,
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+			_, err := ReadDesiredDistribution(context.Background(), cli, "opendatahub")
+			if err == nil {
+				t.Fatal("ReadDesiredDistribution() error = nil, want validation error")
+			}
+		})
 	}
 }
 
