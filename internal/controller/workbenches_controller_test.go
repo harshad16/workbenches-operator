@@ -40,16 +40,14 @@ import (
 	statusutil "github.com/opendatahub-io/workbenches-operator/internal/status"
 )
 
-const (
-	testNotebookControllerDeployment = "odh-notebook-controller"
-	testApplicationsNamespace        = "opendatahub"
-	testPlatformVersion              = "2.20.0"
-)
+const testNotebookControllerDeployment = "odh-notebook-controller"
 
 var _ = Describe("Workbenches Controller", func() {
 	var (
-		reconciler   *controller.WorkbenchesReconciler
-		manifestsDir string
+		reconciler            *controller.WorkbenchesReconciler
+		manifestsDir          string
+		applicationsNamespace = "opendatahub"
+		testPlatformVersion   = "2.20.0"
 	)
 
 	BeforeEach(func() {
@@ -85,7 +83,7 @@ var _ = Describe("Workbenches Controller", func() {
 			Client:                k8sClient,
 			Scheme:                scheme.Scheme,
 			ManifestsBasePath:     manifestsDir,
-			ApplicationsNamespace: testApplicationsNamespace,
+			ApplicationsNamespace: applicationsNamespace,
 		}
 	})
 
@@ -233,7 +231,6 @@ var _ = Describe("Workbenches Controller", func() {
 			nsName := "test-ns-upgrading"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
-			createPlatformConfig()
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -241,7 +238,6 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -249,6 +245,8 @@ var _ = Describe("Workbenches Controller", func() {
 
 			ready := getWorkbenches(wb.Name)
 			Expect(ready.Status.Phase).To(Equal(statusutil.PhaseReady))
+			Expect(ready.Status.Distribution.Name).To(Equal(platformconfig.DistributionNameStandalone))
+			Expect(ready.Status.Distribution.Version).To(Equal("0.0.0"))
 
 			ready.Spec.GatewayDomain = "gateway.example.com"
 			Expect(k8sClient.Update(ctx, ready)).To(Succeed())
@@ -266,7 +264,6 @@ var _ = Describe("Workbenches Controller", func() {
 			nsName := "test-ns-degraded"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
-			createPlatformConfig()
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -274,7 +271,6 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -300,7 +296,6 @@ var _ = Describe("Workbenches Controller", func() {
 			nsName := "test-ns-degraded-recovery"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
-			createPlatformConfig()
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -308,7 +303,6 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -338,7 +332,6 @@ var _ = Describe("Workbenches Controller", func() {
 			nsName := "test-ns-scaled-zero"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
-			createPlatformConfig()
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -346,7 +339,6 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -367,8 +359,8 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(deplCond.Message).To(ContainSubstring("scaled to zero"))
 		})
 
-		It("Should remain not Ready when platform version config is missing", func() {
-			nsName := "test-ns-no-platform-version"
+		It("Should set Ready=True when deployments are available in standalone mode", func() {
+			nsName := "test-ns-ready"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
 
@@ -378,6 +370,67 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
+			})
+
+			_, err := reconcileWorkbenches(reconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Phase).To(Equal(statusutil.PhaseReady))
+			Expect(updated.Status.Distribution.Name).To(Equal(platformconfig.DistributionNameStandalone))
+			Expect(updated.Status.Distribution.Version).To(Equal("0.0.0"))
+
+			readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal("ReconcileSuccess"))
+
+			degradedCond := meta.FindStatusCondition(updated.Status.Conditions, "Degraded")
+			Expect(degradedCond).NotTo(BeNil())
+			Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse))
+		})
+
+		It("Should fall back to standalone when ApplicationsNamespace is not configured", func() {
+			nsName := "test-ns-no-apps-namespace"
+			createNamespace(nsName)
+			createDeployment(nsName, "odh-notebook-controller")
+
+			standaloneReconciler := &controller.WorkbenchesReconciler{
+				Client:            k8sClient,
+				Scheme:            scheme.Scheme,
+				ManifestsBasePath: manifestsDir,
+			}
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconcileWorkbenches(standaloneReconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Phase).To(Equal(statusutil.PhaseReady))
+			Expect(updated.Status.Distribution.Name).To(Equal(platformconfig.DistributionNameStandalone))
+			Expect(updated.Status.Distribution.Version).To(Equal("0.0.0"))
+		})
+
+		It("Should remain not Ready when platform version config is missing on managed distribution", func() {
+			nsName := "test-ns-no-platform-version"
+			createNamespace(nsName)
+			createDeployment(nsName, "odh-notebook-controller")
+			createPlatformConfig(applicationsNamespace, platformconfig.DistributionNameSelfManagedRHOAI, "1.0.0", "")
+
+			wb := createWorkbenches("Managed", nsName, "SelfManagedRhoai")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+				cleanupPlatformConfig(applicationsNamespace)
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -392,11 +445,11 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(readyCond.Reason).To(Equal("PlatformVersionPending"))
 		})
 
-		It("Should set Ready=True when deployments are available and platform handshake is complete", func() {
-			nsName := "test-ns-ready"
+		It("Should set Ready=True when deployments, distribution, and handshake are complete", func() {
+			nsName := "test-ns-managed-ready"
 			createNamespace(nsName)
 			createDeployment(nsName, "odh-notebook-controller")
-			createPlatformConfig()
+			createPlatformConfig(applicationsNamespace, "OpenDataHub", "2.0.0", testPlatformVersion)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -404,7 +457,7 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
+				cleanupPlatformConfig(applicationsNamespace)
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -412,25 +465,19 @@ var _ = Describe("Workbenches Controller", func() {
 
 			updated := getWorkbenches(wb.Name)
 			Expect(updated.Status.Phase).To(Equal(statusutil.PhaseReady))
-
-			readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
-			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCond.Reason).To(Equal("ReconcileSuccess"))
-
-			degradedCond := meta.FindStatusCondition(updated.Status.Conditions, "Degraded")
-			Expect(degradedCond).NotTo(BeNil())
-			Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(updated.Status.Distribution.Name).To(Equal("OpenDataHub"))
+			Expect(updated.Status.Distribution.Version).To(Equal("2.0.0"))
 
 			platformRelease := findPlatformRelease(updated.Status.Releases)
 			Expect(platformRelease).NotTo(BeNil())
 			Expect(platformRelease.Version).To(Equal(testPlatformVersion))
 		})
 
-		It("Should retain the previous platform release until upgrade work completes", func() {
-			nsName := "test-ns-platform-upgrade"
+		It("Should keep status.distribution until upgrade completes", func() {
+			nsName := "test-ns-dist-upgrade"
 			createNamespace(nsName)
-			createPlatformConfig()
+			createDeployment(nsName, "odh-notebook-controller")
+			createPlatformConfig(applicationsNamespace, "OpenDataHub", "1.0.0", testPlatformVersion)
 
 			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
 
@@ -438,57 +485,61 @@ var _ = Describe("Workbenches Controller", func() {
 				cleanupWorkbenches(wb)
 				cleanupDeployments(nsName)
 				cleanupNamespace(nsName)
-				cleanupPlatformConfig()
+				cleanupPlatformConfig(applicationsNamespace)
 			})
 
-			createDeployment(nsName, "odh-notebook-controller")
 			_, err := reconcileWorkbenches(reconciler, wb)
 			Expect(err).NotTo(HaveOccurred())
 
-			updatePlatformConfig("2.21.0")
-			updateNamedDeploymentReplicas(nsName, "odh-notebook-controller", 1, 0)
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Distribution.Version).To(Equal("1.0.0"))
+
+			updatePlatformConfig(applicationsNamespace, "OpenDataHub", "2.0.0", testPlatformVersion)
+			updateDeploymentReplicas(nsName, 1, 0)
 
 			_, err = reconciler.Reconcile(ctx, requestFor(wb))
 			Expect(err).NotTo(HaveOccurred())
 
-			upgrading := getWorkbenches(wb.Name)
-			platformRelease := findPlatformRelease(upgrading.Status.Releases)
-			Expect(platformRelease).NotTo(BeNil())
-			Expect(platformRelease.Version).To(Equal(testPlatformVersion))
+			updated = getWorkbenches(wb.Name)
+			Expect(updated.Status.Distribution.Version).To(Equal("1.0.0"))
 
-			readyCond := meta.FindStatusCondition(upgrading.Status.Conditions, "Ready")
+			readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal("DeploymentsNotReady"))
 
-			updateNamedDeploymentReplicas(nsName, "odh-notebook-controller", 1, 1)
+			updateDeploymentReplicas(nsName, 1, 1)
 
 			_, err = reconciler.Reconcile(ctx, requestFor(wb))
 			Expect(err).NotTo(HaveOccurred())
 
-			pending := getWorkbenches(wb.Name)
-			platformRelease = findPlatformRelease(pending.Status.Releases)
-			Expect(platformRelease).NotTo(BeNil())
-			Expect(platformRelease.Version).To(Equal(testPlatformVersion))
+			updated = getWorkbenches(wb.Name)
+			Expect(updated.Status.Distribution.Version).To(Equal("2.0.0"))
+			Expect(updated.Status.Phase).To(Equal(statusutil.PhaseReady))
+		})
 
-			readyCond = meta.FindStatusCondition(pending.Status.Conditions, "Ready")
+		It("Should gate Ready on distribution alignment before deployments are ready", func() {
+			nsName := "test-ns-dist-pending"
+			createNamespace(nsName)
+			createPlatformConfig(applicationsNamespace, "OpenDataHub", "1.0.0", testPlatformVersion)
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace(nsName)
+				cleanupPlatformConfig(applicationsNamespace)
+			})
+
+			_, err := reconcileWorkbenches(reconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.Distribution.Name).To(BeEmpty())
+			Expect(updated.Status.Distribution.Version).To(BeEmpty())
+
+			readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal("PlatformVersionPending"))
-			Expect(readyCond.Message).To(ContainSubstring("platform upgrade in progress"))
-
-			degradedCond := meta.FindStatusCondition(pending.Status.Conditions, "Degraded")
-			Expect(degradedCond).NotTo(BeNil())
-			Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse))
-
-			_, err = reconciler.Reconcile(ctx, requestFor(wb))
-			Expect(err).NotTo(HaveOccurred())
-
-			ready := getWorkbenches(wb.Name)
-			platformRelease = findPlatformRelease(ready.Status.Releases)
-			Expect(platformRelease).NotTo(BeNil())
-			Expect(platformRelease.Version).To(Equal("2.21.0"))
-			Expect(ready.Status.Phase).To(Equal(statusutil.PhaseReady))
 		})
 
 		It("Should use RHOAI default namespace when platform is SelfManagedRhoai", func() {
@@ -887,17 +938,14 @@ func updateDeploymentReplicas(namespace string, specReplicas, readyReplicas int3
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, deploy)).To(Succeed())
 }
 
-func updateNamedDeploymentReplicas(namespace, name string, specReplicas, readyReplicas int32) {
-	deploy := &appsv1.Deployment{}
-	ExpectWithOffset(1, k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, deploy)).To(Succeed())
+func findPlatformRelease(releases []componentsv1alpha1.ComponentRelease) *componentsv1alpha1.ComponentRelease {
+	for i := range releases {
+		if releases[i].Name == platformconfig.ReleaseName {
+			return &releases[i]
+		}
+	}
 
-	deploy.Spec.Replicas = &specReplicas
-	ExpectWithOffset(1, k8sClient.Update(ctx, deploy)).To(Succeed())
-
-	deploy.Status.ReadyReplicas = readyReplicas
-	deploy.Status.Replicas = specReplicas
-	deploy.Status.AvailableReplicas = readyReplicas
-	ExpectWithOffset(1, k8sClient.Status().Update(ctx, deploy)).To(Succeed())
+	return nil
 }
 
 func cleanupWorkbenches(wb *componentsv1alpha1.Workbenches) {
@@ -945,61 +993,70 @@ func cleanupDeployments(namespace string) {
 }
 
 func ensureNamespace(name string) {
-	ns := &corev1.Namespace{
+	ns := &corev1.Namespace{}
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, ns)
+	if client.IgnoreNotFound(err) != nil {
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		return
+	}
+
+	if err == nil {
+		return
+	}
+
+	ExpectWithOffset(1, k8sClient.Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-	}
-	err := k8sClient.Create(ctx, ns)
-	if err != nil {
-		ExpectWithOffset(1, client.IgnoreAlreadyExists(err)).To(Succeed())
-	}
+	})).To(Succeed())
 }
 
-func createPlatformConfig() {
-	ensureNamespace(testApplicationsNamespace)
+func createPlatformConfig(namespace, distributionName, distributionVersion, platformVersion string) {
+	ensureNamespace(namespace)
+
+	data := map[string]string{
+		platformconfig.DistributionNameKey:    distributionName,
+		platformconfig.DistributionVersionKey: distributionVersion,
+	}
+	if platformVersion != "" {
+		data[platformconfig.VersionDataKey] = platformVersion
+	}
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      platformconfig.ConfigMapName,
-			Namespace: testApplicationsNamespace,
+			Namespace: namespace,
 		},
-		Data: map[string]string{
-			platformconfig.VersionDataKey: testPlatformVersion,
-		},
+		Data: data,
 	}
 	ExpectWithOffset(1, k8sClient.Create(ctx, cm)).To(Succeed())
 }
 
-func updatePlatformConfig(version string) {
+func updatePlatformConfig(namespace, distributionName, distributionVersion, platformVersion string) {
 	cm := &corev1.ConfigMap{}
 	ExpectWithOffset(1, k8sClient.Get(ctx, client.ObjectKey{
 		Name:      platformconfig.ConfigMapName,
-		Namespace: testApplicationsNamespace,
+		Namespace: namespace,
 	}, cm)).To(Succeed())
 
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
 
-	cm.Data[platformconfig.VersionDataKey] = version
+	cm.Data[platformconfig.DistributionNameKey] = distributionName
+	cm.Data[platformconfig.DistributionVersionKey] = distributionVersion
+	if platformVersion != "" {
+		cm.Data[platformconfig.VersionDataKey] = platformVersion
+	} else {
+		delete(cm.Data, platformconfig.VersionDataKey)
+	}
 	ExpectWithOffset(1, k8sClient.Update(ctx, cm)).To(Succeed())
 }
 
-func cleanupPlatformConfig() {
+func cleanupPlatformConfig(namespace string) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      platformconfig.ConfigMapName,
-			Namespace: testApplicationsNamespace,
+			Namespace: namespace,
 		},
 	}
 	ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, cm))).To(Succeed())
-}
-
-func findPlatformRelease(releases []componentsv1alpha1.ComponentRelease) *componentsv1alpha1.ComponentRelease {
-	for i := range releases {
-		if releases[i].Name == platformconfig.ReleaseName {
-			return &releases[i]
-		}
-	}
-
-	return nil
 }

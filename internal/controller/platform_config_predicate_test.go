@@ -39,20 +39,32 @@ func TestPlatformConfigChangedPredicate(t *testing.T) {
 	}{
 		{
 			name: "platform version changed",
-			old:  platformConfigMap("opendatahub", "2.20.0"),
-			new:  platformConfigMap("opendatahub", "2.21.0"),
+			old:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.21.0"),
+			want: true,
+		},
+		{
+			name: "distribution version changed",
+			old:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("opendatahub", "OpenDataHub", "3.6.0", "2.20.0"),
 			want: true,
 		},
 		{
 			name: "unrelated configmap",
-			old:  platformConfigMap("other-ns", "2.20.0"),
-			new:  platformConfigMap("other-ns", "2.21.0"),
+			old:  platformConfigMap("other-ns", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("other-ns", "OpenDataHub", "3.6.0", "2.21.0"),
 			want: false,
 		},
 		{
-			name: "unchanged platform version",
-			old:  platformConfigMap("opendatahub", "2.20.0"),
-			new:  platformConfigMap("opendatahub", "2.20.0"),
+			name: "distribution name changed",
+			old:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("opendatahub", platformconfig.DistributionNameSelfManagedRHOAI, "3.5.0", "2.20.0"),
+			want: true,
+		},
+		{
+			name: "unchanged platform config",
+			old:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
 			want: false,
 		},
 	}
@@ -68,19 +80,21 @@ func TestPlatformConfigChangedPredicate(t *testing.T) {
 		})
 	}
 
-	if !predicate.Create(event.CreateEvent{Object: platformConfigMap("opendatahub", "2.20.0")}) {
+	if !predicate.Create(event.CreateEvent{Object: platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0")}) {
 		t.Fatal("Create() = false, want true")
 	}
 }
 
-func platformConfigMap(namespace, version string) *corev1.ConfigMap {
+func platformConfigMap(namespace, distributionName, distributionVersion, platformVersion string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      platformconfig.ConfigMapName,
 			Namespace: namespace,
 		},
 		Data: map[string]string{
-			platformconfig.VersionDataKey: version,
+			platformconfig.DistributionNameKey:    distributionName,
+			platformconfig.DistributionVersionKey: distributionVersion,
+			platformconfig.VersionDataKey:         platformVersion,
 		},
 	}
 }

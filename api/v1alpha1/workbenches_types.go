@@ -74,6 +74,18 @@ type ComponentRelease struct {
 	RepoURL string `json:"repoUrl,omitempty" yaml:"repoUrl,omitempty"`
 }
 
+// Distribution reports the distribution context the module has reconciled against.
+type Distribution struct {
+	// name is the distribution name (e.g. OpenDataHub, SelfManagedRHOAI, Standalone).
+	// +kubebuilder:validation:Enum=OpenDataHub;SelfManagedRHOAI;Standalone
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name,omitempty"`
+
+	// version is the distribution version the module has reconciled against.
+	// +kubebuilder:validation:MaxLength=64
+	Version string `json:"version,omitempty"`
+}
+
 // WorkbenchesStatus defines the observed state of Workbenches.
 type WorkbenchesStatus struct {
 	// conditions represent the latest available observations of the component's state.
@@ -90,6 +102,9 @@ type WorkbenchesStatus struct {
 
 	// observedGeneration is the most recent generation observed by the controller.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// distribution reflects the distribution context the module has reconciled against.
+	Distribution Distribution `json:"distribution,omitempty"`
 
 	// phase is the overall lifecycle phase of the component.
 	// +kubebuilder:validation:Enum=Pending;Initializing;Ready;Upgrading;Degraded;Failed
