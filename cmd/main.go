@@ -18,15 +18,23 @@ limitations under the License.
 package main
 
 import (
-	"crypto/tls"
+	"context"
 	"errors"
 	"flag"
 	"os"
+	"strings"
+	"time"
 
+	configv1 "github.com/openshift/api/config/v1"
+	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -36,6 +44,7 @@ import (
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/controller"
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
+	"github.com/opendatahub-io/workbenches-operator/internal/tlsconfig"
 	"github.com/opendatahub-io/workbenches-operator/internal/webhook"
 )
 
@@ -47,6 +56,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(configv1.Install(scheme))
 }
 
 func main() {
@@ -76,7 +86,7 @@ func main() {
 		"Base path for component manifests.")
 
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -94,18 +104,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	var tlsOpts []func(*tls.Config)
+	// Bootstrap TLS configuration from the cluster's APIServer TLS profile (OpenShift only).
+	restCfg := ctrl.GetConfigOrDie()
+	bootstrapClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create bootstrap client for TLS profile")
+		os.Exit(1)
+	}
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, func(c *tls.Config) {
-			c.NextProtos = []string{"http/1.1"}
-		})
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	tlsResult, err := tlsconfig.Bootstrap(bootstrapCtx, bootstrapClient, enableHTTP2, tlsconfig.DefaultFetcher())
+	bootstrapCancel()
+	if err != nil {
+		setupLog.Error(err, "unable to read APIServer TLS profile, refusing to start with unknown TLS posture")
+		os.Exit(1)
+	}
+
+	if !tlsResult.HasOpenShiftConfigAPI {
+		setupLog.Info("TLS profile not available, using hardened defaults (non-OpenShift cluster)")
+	} else if len(tlsResult.UnsupportedCiphers) > 0 {
+		setupLog.Info("some ciphers from TLS profile are not supported by Go", "unsupported", tlsResult.UnsupportedCiphers)
 	}
 
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
+		TLSOpts:       tlsResult.TLSOpts,
 	}
 
 	if secureMetrics {
@@ -114,25 +138,49 @@ func main() {
 
 	webhookServer := ctrlwebhook.NewServer(ctrlwebhook.Options{
 		Port:    9443,
-		TLSOpts: tlsOpts,
+		TLSOpts: tlsResult.TLSOpts,
 	})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	providedApplicationsNamespace := strings.TrimSpace(os.Getenv("APPLICATIONS_NAMESPACE"))
+	applicationsNamespace := providedApplicationsNamespace
+	if applicationsNamespace == "" || len(validation.IsDNS1123Label(applicationsNamespace)) > 0 {
+		applicationsNamespace = platform.DefaultNotebooksNamespaceODH
+		if providedApplicationsNamespace == "" {
+			setupLog.Info("APPLICATIONS_NAMESPACE not set; using default",
+				"default", applicationsNamespace)
+		} else {
+			setupLog.Info("APPLICATIONS_NAMESPACE invalid; using default",
+				"provided", providedApplicationsNamespace,
+				"default", applicationsNamespace)
+		}
+	}
+
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "workbenches-operator.platform.opendatahub.io",
-	})
+	}
+	// Partially addresses https://github.com/opendatahub-io/workbenches-operator/issues/43:
+	// scope ConfigMap informer cache to APPLICATIONS_NAMESPACE. Deployment watches remain
+	// cluster-scoped because workbench Deployments live in the workbench namespace, which
+	// can differ from APPLICATIONS_NAMESPACE.
+	mgrOptions.Cache = cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.ConfigMap{}: {
+				Namespaces: map[string]cache.Config{
+					applicationsNamespace: {},
+				},
+			},
+		},
+	}
+
+	mgr, err := ctrl.NewManager(restCfg, mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
-	}
-
-	applicationsNamespace := os.Getenv("APPLICATIONS_NAMESPACE")
-	if applicationsNamespace == "" {
-		applicationsNamespace = platform.DefaultNotebooksNamespaceODH
 	}
 
 	if err = (&controller.WorkbenchesReconciler{
@@ -162,10 +210,38 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register SecurityProfileWatcher on OpenShift: cancel context on TLS profile change so pod restarts.
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+
+	if tlsResult.HasOpenShiftConfigAPI {
+		watcher := &tlspkg.SecurityProfileWatcher{
+			Client:                mgr.GetClient(),
+			InitialTLSProfileSpec: tlsResult.Profile,
+			OnProfileChange: func(_ context.Context, _, _ configv1.TLSProfileSpec) {
+				setupLog.Info("TLS profile changed, initiating graceful shutdown to reload")
+				cancel()
+			},
+		}
+		if tlsResult.TLSAdherenceFetched {
+			watcher.InitialTLSAdherencePolicy = tlsResult.TLSAdherence
+			watcher.OnAdherencePolicyChange = func(_ context.Context, _, _ configv1.TLSAdherencePolicy) {
+				setupLog.Info("TLS adherence policy changed, initiating shutdown to reload")
+				cancel()
+			}
+		}
+		if err := watcher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register TLS security profile watcher")
+			cancel()
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("starting manager")
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
+		cancel()
 		os.Exit(1)
 	}
+	cancel()
 }
