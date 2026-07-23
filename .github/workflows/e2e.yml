@@ -153,7 +153,7 @@ jobs:
 
       - name: Upload logs artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-failure-logs-${{ matrix.deploy-method }}
           path: /tmp/e2e-logs/
