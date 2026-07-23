@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -916,6 +917,146 @@ func TestRenderRealManifests(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestGcOrphanedResourcesDeletesOrphans(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	namespace := "test-gc-orphans"
+	componentLabels := map[string]string{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
+
+	desiredDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "notebook-controller",
+			Namespace: namespace,
+			Labels:    componentLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "notebook-controller"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "notebook-controller"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	orphanDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-notebook-controller",
+			Namespace: namespace,
+			Labels:    componentLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "legacy"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "legacy"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	unlabeledDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-deployment",
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "other"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "other"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(desiredDeploy, orphanDeploy, unlabeledDeploy).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{Client: fakeClient, Scheme: scheme}
+
+	desired := map[objectRef]struct{}{
+		{
+			gvk:       schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"},
+			namespace: namespace,
+			name:      "notebook-controller",
+		}: {},
+	}
+
+	if err := reconciler.gcOrphanedResources(context.Background(), namespace, desired); err != nil {
+		t.Fatalf("gcOrphanedResources() error = %v", err)
+	}
+
+	got := &appsv1.DeploymentList{}
+	if err := fakeClient.List(context.Background(), got, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+
+	names := map[string]bool{}
+	for i := range got.Items {
+		names[got.Items[i].Name] = true
+	}
+
+	if !names["notebook-controller"] {
+		t.Error("desired deployment was deleted")
+	}
+	if names["legacy-notebook-controller"] {
+		t.Error("orphaned labeled deployment was not garbage-collected")
+	}
+	if !names["other-deployment"] {
+		t.Error("unlabeled deployment should be left alone")
+	}
+}
+
+func TestGcOrphanedResourcesSkipsWhenDesiredEmpty(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+
+	namespace := "test-gc-empty"
+	orphan := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-notebook-controller",
+			Namespace: namespace,
+			Labels: map[string]string{
+				metadata.ComponentLabelKey: metadata.LabelTrue,
+				metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "legacy"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "legacy"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(orphan).Build()
+	reconciler := &WorkbenchesReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := reconciler.gcOrphanedResources(context.Background(), namespace, nil); err != nil {
+		t.Fatalf("gcOrphanedResources() error = %v", err)
+	}
+
+	got := &appsv1.Deployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{
+		Namespace: namespace,
+		Name:      "legacy-notebook-controller",
+	}, got); err != nil {
+		t.Fatalf("expected orphan to remain when desired is empty, get error = %v", err)
 	}
 }
 

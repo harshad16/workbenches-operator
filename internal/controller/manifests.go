@@ -67,6 +67,9 @@ func manifestGroupsForPlatform(platformType string) []string {
 // renderAndApply renders the upstream kustomize manifests with parameter injection
 // and applies them to the cluster via Server-Side Apply with ForceOwnership.
 // It copies manifests to a temp directory so the baked-in /opt/manifests stays immutable.
+// After a successful apply it runs continuous GC (ODH-style): labeled managed resources
+// that are no longer present in the rendered desired set are deleted so upgrades drop
+// obsolete operands.
 func (r *WorkbenchesReconciler) renderAndApply(
 	ctx context.Context,
 	owner *componentsv1alpha1.Workbenches,
@@ -96,6 +99,7 @@ func (r *WorkbenchesReconciler) renderAndApply(
 	}
 
 	groups := manifestGroupsForPlatform(platformType)
+	desired := make(map[objectRef]struct{})
 
 	for _, group := range groups {
 		renderDir := filepath.Join(workDir, group)
@@ -117,9 +121,17 @@ func (r *WorkbenchesReconciler) renderAndApply(
 
 		l.Info("rendered manifests", "group", group, "count", len(objects))
 
+		for _, obj := range objects {
+			desired[objectRefFrom(obj)] = struct{}{}
+		}
+
 		if err := r.applyObjects(ctx, owner, objects); err != nil {
 			return fmt.Errorf("failed to apply manifests for %s: %w", group, err)
 		}
+	}
+
+	if err := r.gcOrphanedResources(ctx, namespace, desired); err != nil {
+		return fmt.Errorf("failed to garbage-collect orphaned resources: %w", err)
 	}
 
 	return nil
@@ -333,10 +345,10 @@ var clusterScopedKinds = map[string]bool{
 }
 
 // skipOwnerRefKinds are never owned by the Workbenches CR.
-// - Namespace: cascade would delete the entire namespace.
-// - CustomResourceDefinition: left on cluster for upgrade safety (ODH deployCRD pattern);
-//   also never deleted during cleanup so Notebook CRs are not wiped.
-// - ImageStream: matches live RHOAI / ODH behavior; cleaned via label-based finalizer cleanup.
+//   - Namespace: cascade would delete the entire namespace.
+//   - CustomResourceDefinition: left on cluster for upgrade safety (ODH deployCRD pattern);
+//     also never deleted during cleanup so Notebook CRs are not wiped.
+//   - ImageStream: matches live RHOAI / ODH behavior; cleaned via label-based finalizer cleanup.
 var skipOwnerRefKinds = map[string]bool{
 	"Namespace":                true,
 	"CustomResourceDefinition": true,
@@ -432,6 +444,124 @@ var cleanupClusterGVKs = []schema.GroupVersionKind{
 	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
 }
 
+// objectRef uniquely identifies a managed resource for desired-set GC.
+type objectRef struct {
+	gvk       schema.GroupVersionKind
+	namespace string
+	name      string
+}
+
+func objectRefFrom(obj *unstructured.Unstructured) objectRef {
+	return objectRef{
+		gvk:       obj.GroupVersionKind(),
+		namespace: obj.GetNamespace(),
+		name:      obj.GetName(),
+	}
+}
+
+func componentMatchingLabels() client.MatchingLabels {
+	return client.MatchingLabels{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
+}
+
+// gcOrphanedResources deletes labeled managed resources that are no longer in the
+// rendered desired set (continuous GC, matching ODH gc.NewAction intent).
+// Skips when desired is empty to avoid wiping the cluster if rendering produced nothing.
+// CRDs are never GCd (not listed in cleanupClusterGVKs).
+func (r *WorkbenchesReconciler) gcOrphanedResources(
+	ctx context.Context,
+	namespace string,
+	desired map[objectRef]struct{},
+) error {
+	l := log.FromContext(ctx)
+
+	if len(desired) == 0 {
+		l.Info("skipping continuous GC: no desired resources rendered")
+
+		return nil
+	}
+
+	l.V(1).Info("running continuous GC for orphaned managed resources",
+		"desired", len(desired),
+		"namespace", namespace)
+
+	var errs []error
+	componentLabel := componentMatchingLabels()
+
+	for _, gvk := range cleanupGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+
+		if err := r.List(ctx, list, client.InNamespace(namespace), componentLabel); err != nil {
+			if meta.IsNoMatchError(err) {
+				l.V(1).Info("skipping GVK during GC (API not available)", "gvk", gvk)
+
+				continue
+			}
+
+			errs = append(errs, fmt.Errorf("failed to list %s for GC: %w", gvk, err))
+
+			continue
+		}
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			ref := objectRefFrom(obj)
+			if _, keep := desired[ref]; keep {
+				continue
+			}
+
+			l.Info("garbage-collecting orphaned resource",
+				"kind", obj.GetKind(),
+				"name", obj.GetName(),
+				"namespace", obj.GetNamespace())
+
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				errs = append(errs, fmt.Errorf("failed to GC %s %s/%s: %w",
+					obj.GetKind(), obj.GetNamespace(), obj.GetName(), err))
+			}
+		}
+	}
+
+	for _, gvk := range cleanupClusterGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+
+		if err := r.List(ctx, list, componentLabel); err != nil {
+			if meta.IsNoMatchError(err) {
+				l.V(1).Info("skipping cluster GVK during GC (API not available)", "gvk", gvk)
+
+				continue
+			}
+
+			errs = append(errs, fmt.Errorf("failed to list cluster %s for GC: %w", gvk, err))
+
+			continue
+		}
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			ref := objectRefFrom(obj)
+			if _, keep := desired[ref]; keep {
+				continue
+			}
+
+			l.Info("garbage-collecting orphaned cluster resource",
+				"kind", obj.GetKind(),
+				"name", obj.GetName())
+
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				errs = append(errs, fmt.Errorf("failed to GC %s %s: %w",
+					obj.GetKind(), obj.GetName(), err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // cleanupManagedResources deletes all resources that were applied by this operator,
 // identified by the component labels. It cleans both namespaced and cluster-scoped resources.
 // Cleanup is best-effort: all resource types are attempted even if some fail, and
@@ -442,10 +572,7 @@ func (r *WorkbenchesReconciler) cleanupManagedResources(ctx context.Context, nam
 
 	var errs []error
 
-	componentLabel := client.MatchingLabels{
-		metadata.ComponentLabelKey: metadata.LabelTrue,
-		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
-	}
+	componentLabel := componentMatchingLabels()
 
 	for _, gvk := range cleanupGVKs {
 		list := &unstructured.UnstructuredList{}
