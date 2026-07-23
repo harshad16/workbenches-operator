@@ -28,9 +28,11 @@ import (
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -317,6 +319,167 @@ func TestIsNamespaced(t *testing.T) {
 				t.Errorf("isNamespaced(%q) = %v, want %v", tt.kind, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestShouldSetOwnerReference(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		kind string
+		want bool
+	}{
+		{"Deployment", true},
+		{"Service", true},
+		{"ConfigMap", true},
+		{"Secret", true},
+		{"ServiceAccount", true},
+		{"Role", true},
+		{"RoleBinding", true},
+		{"ClusterRole", true},
+		{"ClusterRoleBinding", true},
+		{"MutatingWebhookConfiguration", true},
+		{"ValidatingWebhookConfiguration", true},
+		{"Namespace", false},
+		{"CustomResourceDefinition", false},
+		{"ImageStream", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			t.Parallel()
+
+			obj := &unstructured.Unstructured{}
+			obj.SetKind(tt.kind)
+
+			got := shouldSetOwnerReference(obj)
+			if got != tt.want {
+				t.Errorf("shouldSetOwnerReference(%q) = %v, want %v", tt.kind, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyObjectsSetsOwnerReferences(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	owner := &componentsv1alpha1.Workbenches{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: componentsv1alpha1.WorkbenchesInstanceName,
+			UID:  "owner-uid-123",
+		},
+	}
+
+	deployment := &unstructured.Unstructured{}
+	deployment.SetAPIVersion("apps/v1")
+	deployment.SetKind("Deployment")
+	deployment.SetName("notebook-controller")
+	deployment.SetNamespace("opendatahub")
+	deployment.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "example.com/v1",
+		Kind:       "Stale",
+		Name:       "stale",
+		UID:        "stale-uid",
+	}})
+
+	clusterRole := &unstructured.Unstructured{}
+	clusterRole.SetAPIVersion("rbac.authorization.k8s.io/v1")
+	clusterRole.SetKind("ClusterRole")
+	clusterRole.SetName("notebook-controller-role")
+
+	namespace := &unstructured.Unstructured{}
+	namespace.SetAPIVersion("v1")
+	namespace.SetKind("Namespace")
+	namespace.SetName("opendatahub")
+
+	crd := &unstructured.Unstructured{}
+	crd.SetAPIVersion("apiextensions.k8s.io/v1")
+	crd.SetKind("CustomResourceDefinition")
+	crd.SetName("notebooks.kubeflow.org")
+
+	imageStream := &unstructured.Unstructured{}
+	imageStream.SetAPIVersion("image.openshift.io/v1")
+	imageStream.SetKind("ImageStream")
+	imageStream.SetName("jupyter-minimal")
+	imageStream.SetNamespace("opendatahub")
+
+	var patched []unstructured.Unstructured
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				u, ok := obj.(*unstructured.Unstructured)
+				if !ok {
+					t.Fatalf("expected unstructured, got %T", obj)
+				}
+				patched = append(patched, *u.DeepCopy())
+
+				return nil
+			},
+		}).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.applyObjects(context.Background(), owner, []*unstructured.Unstructured{
+		deployment,
+		clusterRole,
+		namespace,
+		crd,
+		imageStream,
+	})
+	if err != nil {
+		t.Fatalf("applyObjects() error = %v", err)
+	}
+
+	if len(patched) != 5 {
+		t.Fatalf("expected 5 patched objects, got %d", len(patched))
+	}
+
+	byKind := map[string]unstructured.Unstructured{}
+	for _, obj := range patched {
+		byKind[obj.GetKind()] = obj
+	}
+
+	for _, kind := range []string{"Deployment", "ClusterRole"} {
+		obj := byKind[kind]
+		refs := obj.GetOwnerReferences()
+		if len(refs) != 1 {
+			t.Fatalf("%s ownerRefs len = %d, want 1", kind, len(refs))
+		}
+
+		ref := refs[0]
+		if ref.Name != owner.Name || ref.UID != owner.UID {
+			t.Fatalf("%s ownerRef = %+v, want Workbenches/%s uid=%s", kind, ref, owner.Name, owner.UID)
+		}
+
+		if ref.Controller == nil || !*ref.Controller {
+			t.Fatalf("%s ownerRef.Controller = %v, want true", kind, ref.Controller)
+		}
+
+		if ref.BlockOwnerDeletion == nil || !*ref.BlockOwnerDeletion {
+			t.Fatalf("%s ownerRef.BlockOwnerDeletion = %v, want true", kind, ref.BlockOwnerDeletion)
+		}
+
+		if obj.GetLabels()[metadata.ComponentLabelKey] != metadata.LabelTrue {
+			t.Fatalf("%s missing component label", kind)
+		}
+	}
+
+	for _, kind := range []string{"Namespace", "CustomResourceDefinition", "ImageStream"} {
+		obj := byKind[kind]
+		if len(obj.GetOwnerReferences()) != 0 {
+			t.Fatalf("%s ownerRefs = %+v, want none", kind, obj.GetOwnerReferences())
+		}
 	}
 }
 
@@ -758,6 +921,214 @@ func TestRenderRealManifests(t *testing.T) {
 	}
 }
 
+func TestGcOrphanedResourcesDeletesOrphans(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	namespace := "test-gc-orphans"
+	componentLabels := map[string]string{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
+
+	desiredDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "notebook-controller",
+			Namespace: namespace,
+			Labels:    componentLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "notebook-controller"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "notebook-controller"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	orphanDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-notebook-controller",
+			Namespace: namespace,
+			Labels:    componentLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "legacy"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "legacy"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	unlabeledDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-deployment",
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "other"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "other"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(desiredDeploy, orphanDeploy, unlabeledDeploy).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{Client: fakeClient, Scheme: scheme}
+
+	desired := map[objectRef]struct{}{
+		{
+			gvk:       schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"},
+			namespace: namespace,
+			name:      "notebook-controller",
+		}: {},
+	}
+
+	if err := reconciler.gcOrphanedResources(context.Background(), namespace, desired); err != nil {
+		t.Fatalf("gcOrphanedResources() error = %v", err)
+	}
+
+	got := &appsv1.DeploymentList{}
+	if err := fakeClient.List(context.Background(), got, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+
+	names := map[string]bool{}
+	for i := range got.Items {
+		names[got.Items[i].Name] = true
+	}
+
+	if !names["notebook-controller"] {
+		t.Error("desired deployment was deleted")
+	}
+	if names["legacy-notebook-controller"] {
+		t.Error("orphaned labeled deployment was not garbage-collected")
+	}
+	if !names["other-deployment"] {
+		t.Error("unlabeled deployment should be left alone")
+	}
+}
+
+func TestGcOrphanedResourcesDeletesClusterScopedOrphans(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(rbacv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	namespace := "test-gc-cluster-orphans"
+	componentLabels := map[string]string{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
+
+	desiredRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "workbenches-desired",
+			Labels: componentLabels,
+		},
+	}
+	orphanRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "workbenches-orphan",
+			Labels: componentLabels,
+		},
+	}
+	unlabeledRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-clusterrole"},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(desiredRole, orphanRole, unlabeledRole).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{Client: fakeClient, Scheme: scheme}
+	desired := map[objectRef]struct{}{
+		{
+			gvk:  schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
+			name: "workbenches-desired",
+		}: {},
+	}
+
+	if err := reconciler.gcOrphanedResources(context.Background(), namespace, desired); err != nil {
+		t.Fatalf("gcOrphanedResources() error = %v", err)
+	}
+
+	got := &rbacv1.ClusterRoleList{}
+	if err := fakeClient.List(context.Background(), got); err != nil {
+		t.Fatalf("list clusterroles: %v", err)
+	}
+
+	names := map[string]bool{}
+	for i := range got.Items {
+		names[got.Items[i].Name] = true
+	}
+
+	if !names["workbenches-desired"] {
+		t.Error("desired ClusterRole was deleted")
+	}
+	if names["workbenches-orphan"] {
+		t.Error("orphaned labeled ClusterRole was not garbage-collected")
+	}
+	if !names["other-clusterrole"] {
+		t.Error("unlabeled ClusterRole should be left alone")
+	}
+}
+
+func TestGcOrphanedResourcesSkipsWhenDesiredEmpty(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+
+	namespace := "test-gc-empty"
+	orphan := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-notebook-controller",
+			Namespace: namespace,
+			Labels: map[string]string{
+				metadata.ComponentLabelKey: metadata.LabelTrue,
+				metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "legacy"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "legacy"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(orphan).Build()
+	reconciler := &WorkbenchesReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := reconciler.gcOrphanedResources(context.Background(), namespace, nil); err != nil {
+		t.Fatalf("gcOrphanedResources() error = %v", err)
+	}
+
+	got := &appsv1.Deployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{
+		Namespace: namespace,
+		Name:      "legacy-notebook-controller",
+	}, got); err != nil {
+		t.Fatalf("expected orphan to remain when desired is empty, get error = %v", err)
+	}
+}
+
 func TestCleanupManagedResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -815,9 +1186,21 @@ func TestCleanupManagedResources(t *testing.T) {
 		},
 	}
 
+	labeledSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "notebook-secret",
+			Namespace: namespace,
+			Labels: map[string]string{
+				metadata.ComponentLabelKey: metadata.LabelTrue,
+				metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+			},
+		},
+		Data: map[string][]byte{"key": []byte("value")},
+	}
+
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(labeledDeploy, unlabeledDeploy, labeledSvc).
+		WithObjects(labeledDeploy, unlabeledDeploy, labeledSvc, labeledSecret).
 		Build()
 
 	reconciler := &WorkbenchesReconciler{
@@ -853,6 +1236,16 @@ func TestCleanupManagedResources(t *testing.T) {
 
 	if len(svcList.Items) != 0 {
 		t.Errorf("expected 0 services, got %d", len(svcList.Items))
+	}
+
+	// Labeled secret should be gone (owned + in cleanupGVKs, matching ODH)
+	secretList := &corev1.SecretList{}
+	if err := fakeClient.List(ctx, secretList, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+
+	if len(secretList.Items) != 0 {
+		t.Errorf("expected 0 secrets, got %d", len(secretList.Items))
 	}
 }
 
