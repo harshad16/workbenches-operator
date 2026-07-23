@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/types"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 	sigyaml "sigs.k8s.io/yaml"
 
+	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 )
@@ -65,7 +67,13 @@ func manifestGroupsForPlatform(platformType string) []string {
 // renderAndApply renders the upstream kustomize manifests with parameter injection
 // and applies them to the cluster via Server-Side Apply with ForceOwnership.
 // It copies manifests to a temp directory so the baked-in /opt/manifests stays immutable.
-func (r *WorkbenchesReconciler) renderAndApply(ctx context.Context, params map[string]string, namespace string, platformType string) error {
+func (r *WorkbenchesReconciler) renderAndApply(
+	ctx context.Context,
+	owner *componentsv1alpha1.Workbenches,
+	params map[string]string,
+	namespace string,
+	platformType string,
+) error {
 	l := log.FromContext(ctx)
 
 	workDir, err := os.MkdirTemp("", "workbenches-manifests-*")
@@ -109,7 +117,7 @@ func (r *WorkbenchesReconciler) renderAndApply(ctx context.Context, params map[s
 
 		l.Info("rendered manifests", "group", group, "count", len(objects))
 
-		if err := r.applyObjects(ctx, objects); err != nil {
+		if err := r.applyObjects(ctx, owner, objects); err != nil {
 			return fmt.Errorf("failed to apply manifests for %s: %w", group, err)
 		}
 	}
@@ -252,11 +260,29 @@ func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[str
 
 // applyObjects applies a set of unstructured objects to the cluster using Server-Side Apply.
 // Namespace references are already set correctly by kustomize (via patchKustomizeNamespace).
-func (r *WorkbenchesReconciler) applyObjects(ctx context.Context, objects []*unstructured.Unstructured) error {
+// Owner references are set with SetControllerReference (matching opendatahub-operator) so
+// Owns() watches fire on drift and Kubernetes GC can cascade-delete owned children when the
+// Workbenches CR is deleted. Namespaces, CRDs, and ImageStreams are intentionally excluded.
+func (r *WorkbenchesReconciler) applyObjects(
+	ctx context.Context,
+	owner *componentsv1alpha1.Workbenches,
+	objects []*unstructured.Unstructured,
+) error {
 	l := log.FromContext(ctx)
 
 	for _, obj := range objects {
 		setComponentLabels(obj)
+
+		if shouldSetOwnerReference(obj) {
+			// Clear any template-defined ownerReferences before setting the
+			// controller reference — applyObjects is the single source of truth.
+			obj.SetOwnerReferences(nil)
+
+			if err := controllerutil.SetControllerReference(owner, obj, r.Scheme); err != nil {
+				return fmt.Errorf("failed to set owner reference on %s %s/%s: %w",
+					obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+			}
+		}
 
 		obj.SetManagedFields(nil)
 
@@ -306,8 +332,23 @@ var clusterScopedKinds = map[string]bool{
 	"ValidatingWebhookConfiguration": true,
 }
 
+// skipOwnerRefKinds are never owned by the Workbenches CR.
+// - Namespace: cascade would delete the entire namespace.
+// - CustomResourceDefinition: left on cluster for upgrade safety (ODH deployCRD pattern);
+//   also never deleted during cleanup so Notebook CRs are not wiped.
+// - ImageStream: matches live RHOAI / ODH behavior; cleaned via label-based finalizer cleanup.
+var skipOwnerRefKinds = map[string]bool{
+	"Namespace":                true,
+	"CustomResourceDefinition": true,
+	"ImageStream":              true,
+}
+
 func isNamespaced(obj *unstructured.Unstructured) bool {
 	return !clusterScopedKinds[obj.GetKind()]
+}
+
+func shouldSetOwnerReference(obj *unstructured.Unstructured) bool {
+	return !skipOwnerRefKinds[obj.GetKind()]
 }
 
 // patchKustomizeNamespace sets the namespace field in the kustomization file
@@ -382,12 +423,13 @@ var cleanupGVKs = []schema.GroupVersionKind{
 }
 
 // cleanupClusterGVKs lists the GroupVersionKinds of cluster-scoped resources to clean up.
+// CustomResourceDefinitions are intentionally omitted: ODH never owned or GCd CRDs, and
+// deleting notebooks.kubeflow.org would cascade-delete all Notebook instances.
 var cleanupClusterGVKs = []schema.GroupVersionKind{
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
 	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration"},
 	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
-	{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
 }
 
 // cleanupManagedResources deletes all resources that were applied by this operator,
