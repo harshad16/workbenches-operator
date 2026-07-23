@@ -24,11 +24,14 @@ import (
 	"strconv"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -44,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 	"github.com/opendatahub-io/workbenches-operator/internal/platformconfig"
@@ -57,7 +61,11 @@ const (
 	conditionTypeDegraded                 = "Degraded"
 	conditionTypeDeploymentsAvailable     = "DeploymentsAvailable"
 	conditionTypeReleaseMetadataAvailable = "ReleaseMetadataAvailable"
-	requeueDelay                          = 30 * time.Second
+	// ImageStreamsAvailable is informational only (matches ODH); it does not gate Ready.
+	conditionTypeImageStreamsAvailable  = "ImageStreamsAvailable"
+	conditionReasonImageStreamsNotReady = "ImageStreamsNotReady"
+	conditionReasonAvailable            = "Available"
+	requeueDelay                        = 30 * time.Second
 
 	rateLimiterBaseDelay = 5 * time.Second
 	rateLimiterMaxDelay  = 5 * time.Minute
@@ -88,7 +96,7 @@ type WorkbenchesReconciler struct {
 // escalate and bind for RBAC resources are granted in a separate hand-maintained ClusterRole
 // (config/rbac/rbac_escalate_role.yaml) scoped to specific resourceNames from upstream manifests.
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch
 // Write verbs are required because the operator creates/patches webhook configs from upstream manifests via SSA
 // and deletes them during component removal.
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
@@ -133,18 +141,21 @@ func (r *WorkbenchesReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // A custom rate limiter is configured with exponential backoff (5s base, 5m max)
 // to avoid tight retry loops on persistent failures like missing manifests.
 func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// TODO: Add Owns() watches for managed child resources once applyObjects() sets
-	// OwnerReferences on created objects. Without owner refs, Owns() watches are
-	// ineffective because controller-runtime relies on them to map child events
-	// back to the parent Workbenches CR.
-	// See: https://github.com/opendatahub-io/workbenches-operator/issues/30
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&componentsv1alpha1.Workbenches{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(
-			&appsv1.Deployment{},
-			handler.EnqueueRequestsFromMapFunc(r.mapComponentDeploymentToWorkbenches),
-			builder.WithPredicates(deploymentAvailabilityChangedPredicate{}),
-		).
+		// Owned operands — OwnerReferences are set in applyObjects via SetControllerReference.
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
+		Owns(&rbacv1.ClusterRole{}).
+		Owns(&rbacv1.ClusterRoleBinding{}).
+		Owns(&admissionregistrationv1.MutatingWebhookConfiguration{}).
+		Owns(&admissionregistrationv1.ValidatingWebhookConfiguration{}).
+		// Deployments also need status (replica) updates, not only generation changes.
+		Owns(&appsv1.Deployment{}, builder.WithPredicates(deploymentAvailabilityChangedPredicate{})).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPlatformConfigToWorkbenches),
@@ -157,6 +168,25 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				rateLimiterMaxDelay,
 			),
 		})
+
+	// Watch ImageStreams for drift reconcile + ImageStreamsAvailable status.
+	// Do not Own them and do not list them in cleanupGVKs (ODH onlyOwned parity).
+	// Filter to managed part-of labels so unrelated ImageStream churn does not
+	// enqueue full reconciles (module-operator hardening vs ODH watch-all).
+	watchIS, err := shouldWatchImageStreams(mgr.GetRESTMapper())
+	if err != nil {
+		return fmt.Errorf("failed to check ImageStream API availability: %w", err)
+	}
+
+	if watchIS {
+		imageStream := &unstructured.Unstructured{}
+		imageStream.SetGroupVersionKind(gvk.ImageStream)
+		ctrlBuilder = ctrlBuilder.Watches(
+			imageStream,
+			handler.EnqueueRequestsFromMapFunc(r.mapImageStreamToWorkbenches),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isManagedPartOfLabel)),
+		)
+	}
 
 	return ctrlBuilder.Complete(r)
 }
@@ -174,6 +204,20 @@ func (r *WorkbenchesReconciler) platformConfigWatchNamespaces() []string {
 		platform.DefaultApplicationsNamespaceODH,
 		platform.DefaultApplicationsNamespaceRHOAI,
 	}
+}
+
+func shouldWatchImageStreams(mapper meta.RESTMapper) (bool, error) {
+	_, err := mapper.RESTMapping(gvk.ImageStream.GroupKind(), gvk.ImageStream.Version)
+	if err == nil {
+		return true, nil
+	}
+
+	if meta.IsNoMatchError(err) {
+		// Vanilla Kubernetes / envtest without OpenShift image API.
+		return false, nil
+	}
+
+	return false, err
 }
 
 func (r *WorkbenchesReconciler) mapPlatformConfigToWorkbenches(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -210,34 +254,14 @@ func (r *WorkbenchesReconciler) mapPlatformConfigToWorkbenches(ctx context.Conte
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName}}}
 }
 
-func (r *WorkbenchesReconciler) mapComponentDeploymentToWorkbenches(ctx context.Context, obj client.Object) []reconcile.Request {
-	deploy, ok := obj.(*appsv1.Deployment)
-	if !ok {
-		return nil
-	}
+// mapImageStreamToWorkbenches enqueues the singleton Workbenches CR for managed
+// ImageStream events (predicate already filters to part-of=workbenches).
+func (r *WorkbenchesReconciler) mapImageStreamToWorkbenches(_ context.Context, _ client.Object) []reconcile.Request {
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName}}}
+}
 
-	if deploy.GetLabels()[metadata.ComponentLabelKey] != metadata.LabelTrue {
-		return nil
-	}
-
-	wb := &componentsv1alpha1.Workbenches{}
-
-	err := r.Get(ctx, types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName}, wb)
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "failed to get Workbenches for deployment watch")
-		}
-
-		return nil
-	}
-
-	if deploy.GetNamespace() != r.resolveOperandNamespace(wb.Spec.Platform) {
-		return nil
-	}
-
-	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName},
-	}}
+func isManagedPartOfLabel(obj client.Object) bool {
+	return obj != nil && obj.GetLabels()[metadata.PartOfLabelKey] == metadata.ComponentLabelValue
 }
 
 type deploymentAvailabilityChangedPredicate struct{}
@@ -411,7 +435,7 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 	params := r.computeKustomizeParams(wb)
 	l.V(1).Info("computed kustomize params", "params", params)
 
-	if err = r.renderAndApply(ctx, params, nsName, wb.Spec.Platform); err != nil {
+	if err = r.renderAndApply(ctx, wb, params, nsName, wb.Spec.Platform); err != nil {
 		return r.setErrorStatus(ctx, wb, "ManifestApplyFailed", err)
 	}
 
@@ -432,7 +456,7 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
 			Type:               conditionTypeReleaseMetadataAvailable,
 			Status:             metav1.ConditionTrue,
-			Reason:             "Available",
+			Reason:             conditionReasonAvailable,
 			Message:            "Component release metadata is available",
 			ObservedGeneration: wb.Generation,
 		})
@@ -448,6 +472,10 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 
 	deploymentsReady, deployMsg := r.checkDeployments(ctx, wb)
 	r.setDeploymentCondition(wb, deploymentsReady, deployMsg)
+
+	if err = r.syncImageStreamsAvailable(ctx, wb, nsName); err != nil {
+		return r.setErrorStatus(ctx, wb, "ImageStreamsStatusFailed", err)
+	}
 
 	provisioningSucceeded := meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeProvisioningSucceeded)
 	if deploymentsReady && provisioningSucceeded &&
@@ -479,6 +507,7 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 		platformVersion,
 		reconciledPlatformVersion,
 	)
+	appendImageStreamWarningToReady(wb)
 
 	wb.Status.ObservedGeneration = wb.Generation
 
@@ -511,7 +540,7 @@ func (r *WorkbenchesReconciler) setDeploymentCondition(wb *componentsv1alpha1.Wo
 		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
 			Type:               conditionTypeDeploymentsAvailable,
 			Status:             metav1.ConditionTrue,
-			Reason:             "Available",
+			Reason:             conditionReasonAvailable,
 			Message:            "All deployments are available",
 			ObservedGeneration: wb.Generation,
 		})
