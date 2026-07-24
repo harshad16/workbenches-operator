@@ -21,6 +21,7 @@ FROM registry.redhat.io/ubi9-minimal@sha256:2e8edce823a48e51858f1fad3ff4cbf6875c
 
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY opt/manifests /opt/manifests
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]
