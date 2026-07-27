@@ -1,8 +1,22 @@
 name: E2E Tests
 
 on:
+  push:
+    branches: [main, stable, v1.x]
+    paths:
+      - "cmd/**"
+      - "api/**"
+      - "internal/**"
+      - "Dockerfile"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - "config/**"
+      - "charts/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e.yml"
   pull_request:
-    branches: [main]
+    branches: [main, stable, v1.x]
     paths:
       - "cmd/**"
       - "api/**"
