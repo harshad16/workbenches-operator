@@ -161,15 +161,20 @@ func main() {
 		})
 	}
 	// Partially addresses https://github.com/opendatahub-io/workbenches-operator/issues/43:
-	// scope ConfigMap informer cache to APPLICATIONS_NAMESPACE. Deployment watches remain
-	// cluster-scoped because workbench Deployments live in the workbench namespace, which
-	// can differ from APPLICATIONS_NAMESPACE.
+	// scope ConfigMap informer cache to APPLICATIONS_NAMESPACE. When unset, watch both
+	// platform default apps namespaces so handshake works before CR platform is known.
+	// Deployment watches remain cluster-scoped; the mapper filters to the resolved apps NS.
+	cmNamespaces := map[string]cache.Config{}
+	if applicationsNamespace != "" {
+		cmNamespaces[applicationsNamespace] = cache.Config{}
+	} else {
+		cmNamespaces[platform.DefaultApplicationsNamespaceODH] = cache.Config{}
+		cmNamespaces[platform.DefaultApplicationsNamespaceRHOAI] = cache.Config{}
+	}
 	mgrOptions.Cache = cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.ConfigMap{}: {
-				Namespaces: map[string]cache.Config{
-					applicationsNamespace: {},
-				},
+				Namespaces: cmNamespaces,
 			},
 		},
 	}
@@ -273,16 +278,17 @@ func resolveApplicationsNamespace() string {
 		return provided
 	}
 
-	ns := platform.DefaultNotebooksNamespaceODH
+	// Leave empty so the reconciler can fall back from Workbenches.spec.platform
+	// (opendatahub vs redhat-ods-applications). Product installs always inject the env.
+	// setupLog is intentional here: this runs during process startup before a
+	// reconcile context exists.
 	if provided == "" {
-		setupLog.Info("APPLICATIONS_NAMESPACE not set; using default",
-			"default", ns)
+		setupLog.Info("APPLICATIONS_NAMESPACE not set; reconciler will use platform default")
 	} else {
-		setupLog.Info("APPLICATIONS_NAMESPACE invalid; using default",
-			"provided", provided,
-			"default", ns)
+		setupLog.Info("APPLICATIONS_NAMESPACE invalid; reconciler will use platform default",
+			"provided", provided)
 	}
-	return ns
+	return ""
 }
 
 func addWebhookTLSEnsurer(mgr ctrl.Manager, cfg *rest.Config, cli client.Client) error {

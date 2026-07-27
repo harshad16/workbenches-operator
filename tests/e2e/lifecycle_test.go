@@ -69,7 +69,7 @@ func registerCELValidationTests() {
 				},
 				Spec: componentsv1alpha1.WorkbenchesSpec{
 					ManagementState:    "Managed",
-					WorkbenchNamespace: defaultTestWorkbenchNamespace,
+					WorkbenchNamespace: defaultTestLegacyWorkbenchNamespace,
 					Platform:           "OpenDataHub",
 				},
 			}
@@ -94,18 +94,17 @@ func registerComponentLifecycleTests() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			// Read back the actual workbench namespace from the CR (it may differ
-			// from the default if the CR already existed on the cluster).
-			workbenchNamespace = wb.Spec.WorkbenchNamespace
+			// Operands always deploy into APPLICATIONS_NAMESPACE (opendatahub in e2e).
+			operandNamespace = defaultTestApplicationsNamespace
 
 			waitForCondition("ProvisioningSucceeded", metav1.ConditionTrue)
 		})
 
-		It("Should create the configured workbench namespace with ownership label", func() {
-			Expect(workbenchNamespace).NotTo(BeEmpty(), "workbenchNamespace must be set by a prior test")
+		It("Should create the applications namespace with ownership label", func() {
+			Expect(operandNamespace).NotTo(BeEmpty(), "operandNamespace must be set by a prior test")
 
 			ns := &corev1.Namespace{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: workbenchNamespace}, ns)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: operandNamespace}, ns)).To(Succeed())
 
 			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
 		})
@@ -134,9 +133,10 @@ func registerStatusConditionTests() {
 			Expect(readyCond).NotTo(BeNil())
 		})
 
-		It("Should populate status.workbenchNamespace", func() {
+		It("Should populate status.applicationsNamespace with the operand namespace", func() {
 			wb := getWorkbenches()
-			Expect(wb.Status.WorkbenchNamespace).To(Equal(workbenchNamespace))
+			Expect(wb.Status.ApplicationsNamespace).To(Equal(operandNamespace))
+			Expect(wb.Status.WorkbenchNamespace).To(Equal(defaultTestLegacyWorkbenchNamespace))
 		})
 
 		It("Should set observedGeneration to match metadata.generation", func() {
@@ -232,36 +232,36 @@ func registerManagementStateTests() {
 func registerOperandHealthTests() {
 	Context("Operand health", Label("lifecycle"), func() {
 		It("Should have the odh-notebook-controller-manager deployment ready", func() {
-			Expect(workbenchNamespace).NotTo(BeEmpty(),
-				"workbenchNamespace must be set by a prior test")
+			Expect(operandNamespace).NotTo(BeEmpty(),
+				"operandNamespace must be set by a prior test")
 
 			Eventually(func(g Gomega) {
 				deploy := &appsv1.Deployment{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "odh-notebook-controller-manager",
-					Namespace: workbenchNamespace,
+					Namespace: operandNamespace,
 				}, deploy)).To(Succeed(),
-					"odh-notebook-controller-manager deployment not found in namespace %q", workbenchNamespace)
+					"odh-notebook-controller-manager deployment not found in namespace %q", operandNamespace)
 
 				g.Expect(deploy.Status.ReadyReplicas).To(BeNumerically(">=", 1),
-					"odh-notebook-controller-manager in %q has no ready replicas", workbenchNamespace)
+					"odh-notebook-controller-manager in %q has no ready replicas", operandNamespace)
 			}, timeout, interval).Should(Succeed())
 		})
 
 		It("Should have the notebook-controller-deployment ready", func() {
-			Expect(workbenchNamespace).NotTo(BeEmpty(),
-				"workbenchNamespace must be set by a prior test")
+			Expect(operandNamespace).NotTo(BeEmpty(),
+				"operandNamespace must be set by a prior test")
 
 			Eventually(func(g Gomega) {
 				deploy := &appsv1.Deployment{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "notebook-controller-deployment",
-					Namespace: workbenchNamespace,
+					Namespace: operandNamespace,
 				}, deploy)).To(Succeed(),
-					"notebook-controller-deployment not found in namespace %q", workbenchNamespace)
+					"notebook-controller-deployment not found in namespace %q", operandNamespace)
 
 				g.Expect(deploy.Status.ReadyReplicas).To(BeNumerically(">=", 1),
-					"notebook-controller-deployment in %q has no ready replicas", workbenchNamespace)
+					"notebook-controller-deployment in %q has no ready replicas", operandNamespace)
 			}, timeout, interval).Should(Succeed())
 		})
 	})

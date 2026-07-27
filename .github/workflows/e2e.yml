@@ -111,17 +111,22 @@ jobs:
 
       - name: Create applications namespace (helm)
         if: matrix.deploy-method == 'helm'
-        # The Helm chart creates odh-workbenches-config ConfigMap in applicationsNamespace.
-        # In production, opendatahub-operator creates this namespace; in CI we must do it manually.
+        # The Helm chart creates odh-workbenches-config in the resolved applications
+        # namespace (applicationsNamespace, or operatorNamespace when unset). Standalone
+        # Makefile sets APPLICATIONS_NAMESPACE=opendatahub while the operator Deployment
+        # stays in workbenches-operator-system. In production, opendatahub-operator
+        # sets a single operatorNamespace=ApplicationsNamespace for both.
         run: kubectl create namespace opendatahub
 
       - name: Deploy operator with webhooks (helm)
         if: matrix.deploy-method == 'helm'
+        # Append extras; do not replace HELM_DEPLOY_SETS or applicationsNamespace
+        # falls back to operatorNamespace (workbenches-operator-system) and e2e
+        # expectations for opendatahub break.
         run: |
           make helm-deploy \
             IMG=workbenches-operator:e2e \
-            HELM_DEPLOY_SETS="--set webhooks.tlsProvider=certmanager \
-              --set params.workbenchesOperatorImage=workbenches-operator:e2e \
+            HELM_DEPLOY_EXTRA_SETS="--set webhooks.tlsProvider=certmanager \
               --set image.pullPolicy=Never"
 
       # --- shared post-deploy steps ---
