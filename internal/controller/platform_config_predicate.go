@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,11 +28,11 @@ import (
 )
 
 type platformConfigChangedPredicate struct {
-	applicationsNamespace string
+	applicationsNamespaces []string
 }
 
-func newPlatformConfigChangedPredicate(applicationsNamespace string) platformConfigChangedPredicate {
-	return platformConfigChangedPredicate{applicationsNamespace: applicationsNamespace}
+func newPlatformConfigChangedPredicate(applicationsNamespaces ...string) platformConfigChangedPredicate {
+	return platformConfigChangedPredicate{applicationsNamespaces: applicationsNamespaces}
 }
 
 func (p platformConfigChangedPredicate) Create(e event.CreateEvent) bool {
@@ -66,7 +67,11 @@ func (p platformConfigChangedPredicate) matches(obj client.Object) bool {
 		return false
 	}
 
-	return cm.GetName() == platformconfig.ConfigMapName && cm.GetNamespace() == p.applicationsNamespace
+	if cm.GetName() != platformconfig.ConfigMapName {
+		return false
+	}
+
+	return slices.Contains(p.applicationsNamespaces, cm.GetNamespace())
 }
 
 func platformConfigValue(cm *corev1.ConfigMap) string {
