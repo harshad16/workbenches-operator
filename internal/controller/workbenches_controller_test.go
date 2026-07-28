@@ -17,6 +17,7 @@ limitations under the License.
 package controller_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
@@ -40,7 +42,10 @@ import (
 	statusutil "github.com/opendatahub-io/workbenches-operator/internal/status"
 )
 
-const testNotebookControllerDeployment = "odh-notebook-controller"
+const (
+	testNotebookControllerDeployment = "odh-notebook-controller"
+	conditionReasonUnknown           = "Unknown"
+)
 
 var _ = Describe("Workbenches Controller", func() {
 	var (
@@ -894,6 +899,67 @@ var _ = Describe("Workbenches Controller", func() {
 			result, err := reconciler.Reconcile(ctx, requestFor(wb))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
+		})
+	})
+
+	Context("When conditions have empty reasons", func() {
+		It("Should sanitize empty reasons before status update", func() {
+			nsName := "test-ns-empty-reason"
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconcileWorkbenches(reconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			// We cannot write a condition with empty Reason through the
+			// validated status API (CRD enforces minLength: 1). Instead,
+			// wrap the client so that every Get of the Workbenches CR
+			// injects a foreign condition with an empty Reason, simulating
+			// what a pre-existing or foreign-controller condition looks
+			// like when the reconciler reads the object.
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+			Expect(err).NotTo(HaveOccurred())
+
+			wrappedClient := interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if getErr := c.Get(ctx, key, obj, opts...); getErr != nil {
+						return getErr
+					}
+					if wbObj, ok := obj.(*componentsv1alpha1.Workbenches); ok {
+						meta.SetStatusCondition(&wbObj.Status.Conditions, metav1.Condition{
+							Type:    "ForeignCondition",
+							Status:  metav1.ConditionFalse,
+							Reason:  "",
+							Message: "set by another controller with empty reason",
+						})
+					}
+					return nil
+				},
+			})
+
+			interceptedReconciler := &controller.WorkbenchesReconciler{
+				Client:                wrappedClient,
+				Scheme:                scheme.Scheme,
+				ManifestsBasePath:     manifestsDir,
+				ApplicationsNamespace: applicationsNamespace,
+			}
+
+			// Reconcile with the intercepted client — the sanitizer must
+			// fix the empty Reason before the Status().Update() call.
+			_, err = interceptedReconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Read back via the real client (no interception) and verify
+			// the foreign condition was persisted with a sanitized Reason.
+			final := getWorkbenches(wb.Name)
+			foreignCond := meta.FindStatusCondition(final.Status.Conditions, "ForeignCondition")
+			Expect(foreignCond).NotTo(BeNil())
+			Expect(foreignCond.Reason).To(Equal(conditionReasonUnknown),
+				"empty Reason should have been sanitized to 'Unknown'")
 		})
 	})
 
