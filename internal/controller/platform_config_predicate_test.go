@@ -23,13 +23,43 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
+	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 	"github.com/opendatahub-io/workbenches-operator/internal/platformconfig"
 )
+
+func TestPlatformConfigWatchNamespaces(t *testing.T) {
+	t.Parallel()
+
+	t.Run("configured applications namespace", func(t *testing.T) {
+		t.Parallel()
+
+		r := &WorkbenchesReconciler{ApplicationsNamespace: "custom-apps"}
+		got := r.platformConfigWatchNamespaces()
+		if len(got) != 1 || got[0] != "custom-apps" {
+			t.Fatalf("platformConfigWatchNamespaces() = %#v, want [custom-apps]", got)
+		}
+	})
+
+	t.Run("unset falls back to both platform defaults", func(t *testing.T) {
+		t.Parallel()
+
+		r := &WorkbenchesReconciler{}
+		got := r.platformConfigWatchNamespaces()
+		if len(got) != 2 {
+			t.Fatalf("platformConfigWatchNamespaces() len = %d, want 2", len(got))
+		}
+		if got[0] != platform.DefaultApplicationsNamespaceODH ||
+			got[1] != platform.DefaultApplicationsNamespaceRHOAI {
+			t.Fatalf("platformConfigWatchNamespaces() = %#v, want [%s %s]",
+				got, platform.DefaultApplicationsNamespaceODH, platform.DefaultApplicationsNamespaceRHOAI)
+		}
+	})
+}
 
 func TestPlatformConfigChangedPredicate(t *testing.T) {
 	t.Parallel()
 
-	predicate := newPlatformConfigChangedPredicate("opendatahub")
+	predicate := newPlatformConfigChangedPredicate("opendatahub", "redhat-ods-applications")
 
 	tests := []struct {
 		name string
@@ -47,6 +77,12 @@ func TestPlatformConfigChangedPredicate(t *testing.T) {
 			name: "distribution version changed",
 			old:  platformConfigMap("opendatahub", "OpenDataHub", "3.5.0", "2.20.0"),
 			new:  platformConfigMap("opendatahub", "OpenDataHub", "3.6.0", "2.20.0"),
+			want: true,
+		},
+		{
+			name: "rhoai default apps namespace accepted when watching both defaults",
+			old:  platformConfigMap("redhat-ods-applications", "OpenDataHub", "3.5.0", "2.20.0"),
+			new:  platformConfigMap("redhat-ods-applications", "OpenDataHub", "3.5.0", "2.21.0"),
 			want: true,
 		},
 		{

@@ -177,6 +177,25 @@ MutatingWebhookConfiguration name.
 {{- end }}
 
 {{/*
+Resolved applications namespace for operands / platform ConfigMap / APPLICATIONS_NAMESPACE.
+
+Platform ModuleHandler only injects one Helm value (operatorNamespace =
+ApplicationsNamespace). When applicationsNamespace is unset/empty, fall back to
+operatorNamespace so both operator and operands share that namespace.
+
+Standalone installs may set applicationsNamespace explicitly (e.g. Makefile
+APPLICATIONS_NAMESPACE) to keep a dedicated operator namespace.
+*/}}
+{{- define "workbenches-operator.applicationsNamespace" -}}
+{{- $apps := .Values.applicationsNamespace | toString | trim -}}
+{{- if $apps -}}
+{{- $apps -}}
+{{- else -}}
+{{- .Values.operatorNamespace | toString | trim -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Container environment variables. APPLICATIONS_NAMESPACE is appended last so
 extraEnv cannot override it (Kubernetes uses the last duplicate env name).
 */}}
@@ -191,5 +210,5 @@ extraEnv cannot override it (Kubernetes uses the last duplicate env name).
 {{- end }}
 {{- end }}
 - name: APPLICATIONS_NAMESPACE
-  value: {{ .Values.applicationsNamespace | quote }}
+  value: {{ include "workbenches-operator.applicationsNamespace" . | quote }}
 {{- end }}
