@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -144,6 +145,11 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapComponentDeploymentToWorkbenches),
 			builder.WithPredicates(deploymentAvailabilityChangedPredicate{}),
 		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPlatformConfigToWorkbenches),
+			builder.WithPredicates(newPlatformConfigChangedPredicate(r.platformConfigWatchNamespaces()...)),
+		).
 		Named("workbenches").
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](
@@ -152,24 +158,52 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			),
 		})
 
-	if r.ApplicationsNamespace != "" {
-		ctrlBuilder = ctrlBuilder.Watches(
-			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(r.mapPlatformConfigToWorkbenches),
-			builder.WithPredicates(newPlatformConfigChangedPredicate(r.ApplicationsNamespace)),
-		)
-	}
-
 	return ctrlBuilder.Complete(r)
 }
 
-func (r *WorkbenchesReconciler) mapPlatformConfigToWorkbenches(_ context.Context, obj client.Object) []reconcile.Request {
+// platformConfigWatchNamespaces returns namespaces whose odh-workbenches-config
+// ConfigMap should trigger reconcile. When APPLICATIONS_NAMESPACE is set, watch
+// only that namespace; otherwise watch both platform defaults until CR platform
+// selects one.
+func (r *WorkbenchesReconciler) platformConfigWatchNamespaces() []string {
+	if r.ApplicationsNamespace != "" {
+		return []string{r.ApplicationsNamespace}
+	}
+
+	return []string{
+		platform.DefaultApplicationsNamespaceODH,
+		platform.DefaultApplicationsNamespaceRHOAI,
+	}
+}
+
+func (r *WorkbenchesReconciler) mapPlatformConfigToWorkbenches(ctx context.Context, obj client.Object) []reconcile.Request {
 	cm, ok := obj.(*corev1.ConfigMap)
 	if !ok || cm == nil {
 		return nil
 	}
 
-	if cm.GetNamespace() != r.ApplicationsNamespace || cm.GetName() != platformconfig.ConfigMapName {
+	if cm.GetName() != platformconfig.ConfigMapName {
+		return nil
+	}
+
+	wb := &componentsv1alpha1.Workbenches{}
+	err := r.Get(ctx, types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName}, wb)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "failed to get Workbenches for platform config watch")
+		}
+
+		// No CR yet: accept ConfigMaps in any watched default apps namespace.
+		if slices.Contains(r.platformConfigWatchNamespaces(), cm.GetNamespace()) {
+			return []reconcile.Request{{
+				NamespacedName: types.NamespacedName{Name: componentsv1alpha1.WorkbenchesInstanceName},
+			}}
+		}
+
+		return nil
+	}
+
+	if cm.GetNamespace() != r.resolveOperandNamespace(wb.Spec.Platform) {
 		return nil
 	}
 
@@ -197,7 +231,7 @@ func (r *WorkbenchesReconciler) mapComponentDeploymentToWorkbenches(ctx context.
 		return nil
 	}
 
-	if deploy.GetNamespace() != r.resolveWorkbenchNamespace(wb) {
+	if deploy.GetNamespace() != r.resolveOperandNamespace(wb.Spec.Platform) {
 		return nil
 	}
 
@@ -262,7 +296,7 @@ func (r *WorkbenchesReconciler) reconcileDelete(ctx context.Context, wb *compone
 	l.Info("workbenches CR is being deleted, cleaning up managed resources")
 
 	if controllerutil.ContainsFinalizer(wb, workbenchesFinalizer) {
-		nsName := r.resolveWorkbenchNamespace(wb)
+		nsName := r.resolveOperandNamespace(wb.Spec.Platform)
 
 		if err := r.cleanupManagedResources(ctx, nsName); err != nil {
 			l.Error(err, "failed to cleanup managed resources")
@@ -284,7 +318,8 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	l := log.FromContext(ctx)
 	l.Info("workbenches management state is Removed")
 
-	nsName := r.resolveWorkbenchNamespace(wb)
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
+	r.setStatusNamespaces(wb, nsName)
 
 	if err := r.cleanupManagedResources(ctx, nsName); err != nil {
 		return r.setErrorStatus(ctx, wb, "CleanupFailed", err)
@@ -351,6 +386,10 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Resolve and record namespaces early so error paths still persist them.
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
+	r.setStatusNamespaces(wb, nsName)
+
 	if err := validateSpec(wb.Spec); err != nil {
 		return r.setErrorStatus(ctx, wb, "InvalidSpec", err)
 	}
@@ -360,7 +399,7 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 		return r.setErrorStatus(ctx, wb, "PlatformConfigReadFailed", err)
 	}
 
-	platformVersion, err := r.readPlatformVersion(ctx)
+	platformVersion, err := r.readPlatformVersion(ctx, wb)
 	if err != nil {
 		return r.setErrorStatus(ctx, wb, "PlatformVersionReadFailed", err)
 	}
@@ -371,8 +410,6 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 
 	params := r.computeKustomizeParams(wb)
 	l.V(1).Info("computed kustomize params", "params", params)
-
-	nsName := r.resolveWorkbenchNamespace(wb)
 
 	if err = r.renderAndApply(ctx, params, nsName, wb.Spec.Platform); err != nil {
 		return r.setErrorStatus(ctx, wb, "ManifestApplyFailed", err)
@@ -443,7 +480,6 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 		reconciledPlatformVersion,
 	)
 
-	wb.Status.WorkbenchNamespace = nsName
 	wb.Status.ObservedGeneration = wb.Generation
 
 	phaseCtx.Ready = meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeReady)
@@ -494,7 +530,9 @@ func (r *WorkbenchesReconciler) resolveDesiredDistribution(
 	ctx context.Context,
 	wb *componentsv1alpha1.Workbenches,
 ) (componentsv1alpha1.Distribution, error) {
-	desired, err := platformconfig.ReadDesiredDistribution(ctx, r.Client, r.ApplicationsNamespace)
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
+
+	desired, err := platformconfig.ReadDesiredDistribution(ctx, r.Client, nsName)
 	if err != nil {
 		return componentsv1alpha1.Distribution{}, err
 	}
@@ -502,8 +540,13 @@ func (r *WorkbenchesReconciler) resolveDesiredDistribution(
 	return platformconfig.ResolveDesiredDistribution(desired, wb.Spec.Platform, ""), nil
 }
 
-func (r *WorkbenchesReconciler) readPlatformVersion(ctx context.Context) (string, error) {
-	return platformconfig.ReadPlatformVersion(ctx, r.Client, r.ApplicationsNamespace)
+func (r *WorkbenchesReconciler) readPlatformVersion(
+	ctx context.Context,
+	wb *componentsv1alpha1.Workbenches,
+) (string, error) {
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
+
+	return platformconfig.ReadPlatformVersion(ctx, r.Client, nsName)
 }
 
 func (r *WorkbenchesReconciler) setReadyCondition(
@@ -597,7 +640,7 @@ func (r *WorkbenchesReconciler) setReadyCondition(
 
 func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *componentsv1alpha1.Workbenches) error {
 	l := log.FromContext(ctx)
-	nsName := r.resolveWorkbenchNamespace(wb)
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
 
 	ns := &corev1.Namespace{}
 
@@ -607,7 +650,7 @@ func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *c
 			return fmt.Errorf("failed to get namespace %s: %w", nsName, err)
 		}
 
-		l.Info("creating workbench namespace", "namespace", nsName)
+		l.Info("creating applications namespace for workbench operands", "namespace", nsName)
 
 		ns = &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -649,12 +692,25 @@ func validateSpec(spec componentsv1alpha1.WorkbenchesSpec) error {
 	return nil
 }
 
-func (r *WorkbenchesReconciler) resolveWorkbenchNamespace(wb *componentsv1alpha1.Workbenches) string {
-	if wb.Spec.WorkbenchNamespace != "" {
-		return wb.Spec.WorkbenchNamespace
+// setStatusNamespaces records the active operand namespace and echoes the
+// legacy DSC/spec workbenchNamespace onto status for observability.
+func (r *WorkbenchesReconciler) setStatusNamespaces(wb *componentsv1alpha1.Workbenches, appsNS string) {
+	wb.Status.ApplicationsNamespace = appsNS
+	wb.Status.WorkbenchNamespace = wb.Spec.WorkbenchNamespace
+}
+
+// resolveOperandNamespace returns the namespace where notebook-controller
+// operands are deployed and cleaned up.
+//
+// Prefer APPLICATIONS_NAMESPACE when configured on the reconciler. Otherwise
+// fall back by platform: opendatahub (ODH/default) or redhat-ods-applications
+// (SelfManagedRhoai). Spec.WorkbenchNamespace is legacy-only and is not used.
+func (r *WorkbenchesReconciler) resolveOperandNamespace(platformType string) string {
+	if r.ApplicationsNamespace != "" {
+		return r.ApplicationsNamespace
 	}
 
-	return platform.DefaultNotebooksNamespace(wb.Spec.Platform)
+	return platform.DefaultApplicationsNamespace(platformType)
 }
 
 func (r *WorkbenchesReconciler) computeKustomizeParams(wb *componentsv1alpha1.Workbenches) map[string]string {
@@ -672,7 +728,7 @@ func (r *WorkbenchesReconciler) computeKustomizeParams(wb *componentsv1alpha1.Wo
 
 func (r *WorkbenchesReconciler) checkDeployments(ctx context.Context, wb *componentsv1alpha1.Workbenches) (bool, string) {
 	l := log.FromContext(ctx)
-	nsName := r.resolveWorkbenchNamespace(wb)
+	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
 
 	deployments := &appsv1.DeploymentList{}
 
