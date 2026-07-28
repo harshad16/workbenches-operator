@@ -9,7 +9,7 @@ This operator is designed to run as a standalone module operator within the ODH 
 When `spec.managementState` is `Managed`, the operator:
 
 1. Validates the `Workbenches` spec.
-2. Ensures the workbench namespace exists (creating it if needed).
+2. Ensures the resolved applications namespace exists (creating it if needed) for operands and platform ConfigMap — `APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise the platform default (`opendatahub` / `redhat-ods-applications`).
 3. Renders upstream Kustomize manifests with operator-specific parameters (`section-title`, `mlflow-enabled`, `gateway-url`).
 4. Applies resources to the cluster using Server-Side Apply (SSA).
 5. Populates `status.releases` from upstream `component_metadata.yaml` (when present).
@@ -52,25 +52,26 @@ Upstream manifests are **committed** under `opt/manifests/` for hermetic contain
      (OpenShift overlay)             (base)                          (ODH or RHOAI overlay)
 ```
 
-### Upstream manifest sources
+### Manifest sources (ODH and RHOAI)
 
-Manifests under `opt/manifests/` are fetched from upstream repositories and committed to this repo:
+Manifests under `opt/manifests/` are fetched and committed to this repo. Sources are defined in `get_all_manifests.sh` as ODH (upstream) and RHOAI (downstream) maps, selected by `ODH_PLATFORM_TYPE` (`OpenDataHub` or `rhoai`) — same pattern as opendatahub-operator / rhods-operator.
 
-| Component | Source repository | Path |
-|-----------|-------------------|------|
-| `workbenches/kf-notebook-controller` | [opendatahub-io/kubeflow](https://github.com/opendatahub-io/kubeflow) | `components/notebook-controller/config` |
-| `workbenches/odh-notebook-controller` | [opendatahub-io/kubeflow](https://github.com/opendatahub-io/kubeflow) | `components/odh-notebook-controller/config` |
-| `workbenches/notebooks` | [opendatahub-io/notebooks](https://github.com/opendatahub-io/notebooks) | `manifests` |
+| Component | ODH (upstream) | RHOAI (downstream) | Path |
+|-----------|----------------|-------------------|------|
+| `workbenches/kf-notebook-controller` | [opendatahub-io/kubeflow](https://github.com/opendatahub-io/kubeflow) | [red-hat-data-services/kubeflow](https://github.com/red-hat-data-services/kubeflow) | `components/notebook-controller/config` |
+| `workbenches/odh-notebook-controller` | [opendatahub-io/kubeflow](https://github.com/opendatahub-io/kubeflow) | [red-hat-data-services/kubeflow](https://github.com/red-hat-data-services/kubeflow) | `components/odh-notebook-controller/config` |
+| `workbenches/notebooks` | [opendatahub-io/notebooks](https://github.com/opendatahub-io/notebooks) | [red-hat-data-services/notebooks](https://github.com/red-hat-data-services/notebooks) | `manifests` |
 
 **Local refresh:**
 
 ```bash
-make manifests-fetch
+make manifests-fetch                              # ODH / upstream (default)
+make manifests-fetch ODH_PLATFORM_TYPE=rhoai      # RHOAI / downstream
 ```
 
 Do not edit files under `opt/manifests/` manually. After fetching, inspect the tree, run `make test`, then commit both `get_all_manifests.sh` (if sources changed) and `opt/manifests/`.
 
-A scheduled GitHub Action ([`.github/workflows/manifest-sync.yaml`](.github/workflows/manifest-sync.yaml)) runs daily, refreshes manifests, validates rendering with `TestRenderRealManifests`, and opens/updates a PR when content changes. See [`opt/README.md`](opt/README.md) and [`DEPENDENCIES.md`](DEPENDENCIES.md).
+A scheduled GitHub Action ([`.github/workflows/manifest-sync.yaml`](.github/workflows/manifest-sync.yaml)) runs daily, refreshes **ODH** manifests, validates rendering with `TestRenderRealManifests`, and opens/updates a PR when content changes. See [`opt/README.md`](opt/README.md) and [`DEPENDENCIES.md`](DEPENDENCIES.md).
 
 The sync workflow needs permission to open PRs: enable **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**, or configure a fine-grained personal access token (scoped to this repository with `contents: write` and `pull_requests: write`) as a repository secret.
 
@@ -78,14 +79,19 @@ Override individual sources:
 
 ```bash
 ./get_all_manifests.sh --workbenches/kf-notebook-controller=org:repo:branch@sha:source_path
+ODH_PLATFORM_TYPE=rhoai ./get_all_manifests.sh
 ```
 
 ### Platform support
 
-| Platform | `spec.platform` value | Default workbench namespace | Notebooks overlay |
-|----------|----------------------|----------------------------|-------------------|
-| Open Data Hub | `OpenDataHub` | `opendatahub` | `workbenches/notebooks/odh/base` |
-| Self-managed RHOAI | `SelfManagedRhoai` | `rhods-notebooks` | `workbenches/notebooks/rhoai/base` |
+| Platform | `spec.platform` value | Operand namespace | Notebooks overlay |
+|----------|----------------------|-----------------|-------------------|
+| Open Data Hub | `OpenDataHub` | Resolved applications namespace (typically `opendatahub`) | `workbenches/notebooks/odh/base` |
+| Self-managed RHOAI | `SelfManagedRhoai` | Resolved applications namespace (typically `redhat-ods-applications`) | `workbenches/notebooks/rhoai/base` |
+
+`spec.workbenchNamespace` is a legacy field (historically `rhods-notebooks` for JupyterHub-era notebooks) and is **not** used when deploying module operands.
+
+The resolved applications namespace is `APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise the operator falls back by platform (`opendatahub` for OpenDataHub, `redhat-ods-applications` for SelfManagedRhoai).
 
 The operator targets **OpenShift** only. The Kubeflow notebook controller always uses the OpenShift overlay.
 
@@ -119,10 +125,12 @@ Webhook TLS is configured via the Helm chart or Kustomize overlays:
 | Field | Description |
 |-------|-------------|
 | `managementState` | `Managed` (default) or `Removed` |
-| `workbenchNamespace` | Namespace for notebook workloads. Immutable after creation. Defaults to `opendatahub` or `rhods-notebooks` based on platform. |
+| `workbenchNamespace` | Legacy JupyterHub-era notebooks namespace. Immutable after creation. **Not used** for module operand deploy. |
 | `gatewayDomain` | Data science gateway domain. Typically projected by the orchestrator from `GatewayConfig`. Injected as `gateway-url` into operand manifests. |
 | `platform` | `OpenDataHub` or `SelfManagedRhoai`. Typically projected by the orchestrator. Controls notebooks overlay and UI `section-title`. |
 | `mlflowEnabled` | Whether MLflow integration is active. Typically projected by the orchestrator. Injected as `mlflow-enabled` into operand manifests. |
+
+Notebook-controller operands and the platform ConfigMap (`odh-workbenches-config`) always target the **resolved applications namespace**: `APPLICATIONS_NAMESPACE` (Helm `operatorNamespace` / optional `applicationsNamespace`) when set and DNS-1123 valid; otherwise the platform default (`opendatahub` for OpenDataHub, `redhat-ods-applications` for SelfManagedRhoai).
 
 ### Status
 
@@ -132,7 +140,8 @@ The controller publishes conditions including `Ready`, `ProvisioningSucceeded`, 
 |-------|-------------|
 | `phase` | ModuleStatus lifecycle phase (see below) |
 | `distribution` | Distribution context: `name` (`OpenDataHub`, `SelfManagedRHOAI`, or `Standalone`) + `version` |
-| `workbenchNamespace` | Active workbench namespace |
+| `applicationsNamespace` | Resolved operand namespace (`APPLICATIONS_NAMESPACE`, or platform default: `opendatahub` / `redhat-ods-applications`) |
+| `workbenchNamespace` | Echo of legacy `spec.workbenchNamespace` (not the operand deploy target) |
 | `releases` | Component versions from `component_metadata.yaml` and platform version handshake |
 | `observedGeneration` | Last reconciled `metadata.generation` |
 
@@ -151,7 +160,7 @@ The controller publishes conditions including `Ready`, `ProvisioningSucceeded`, 
 
 Phase priority (highest first): `Failed` → `Ready` → `Upgrading` → `Degraded` → `Pending` → `Initializing`.
 
-`Ready=True` requires all deployments labelled `app.opendatahub.io/workbenches=true` in the workbench namespace to have the desired number of ready replicas, and the distribution to be aligned (when a platform ConfigMap is present). Scale-to-zero is treated as unavailable. Release metadata is informational; a missing or malformed `component_metadata.yaml` does not block provisioning.
+`Ready=True` requires all deployments labelled `app.opendatahub.io/workbenches=true` in the resolved applications namespace (`APPLICATIONS_NAMESPACE`, or platform default) to have the desired number of ready replicas, and the distribution to be aligned (when a platform ConfigMap is present). Scale-to-zero is treated as unavailable. Release metadata is informational; a missing or malformed `component_metadata.yaml` does not block provisioning.
 
 When no `odh-workbenches-config` ConfigMap exists, the operator reports `Standalone` as the distribution name.
 
@@ -305,13 +314,14 @@ Helm values of note:
 | Value | Purpose |
 |-------|---------|
 | `createOperatorNamespace` | `false` for platform integration; `true` for standalone installs |
-| `applicationsNamespace` | Sets `APPLICATIONS_NAMESPACE` on the operator pod |
+| `operatorNamespace` | Operator Deployment namespace. **Platform sets this alone** to ApplicationsNamespace (simplest model). |
+| `applicationsNamespace` | Optional. When empty, defaults to `operatorNamespace`. Standalone may set it to keep a dedicated operator NS while operands use another NS. |
 | `rbac.enableRuntimeEscalation` | Grants bind/escalate on upstream operand ClusterRoles |
 | `controllerImage.relatedImageEnv` | `RELATED_IMAGE_ODH_WORKBENCHES_OPERATOR_IMAGE` for platform image injection |
 | `webhooks.tlsProvider` | `openshift`, `certmanager`, or `""` |
 | `devLogging` | Enable debug-level console logging (default `false`) |
 
-In product builds, the platform orchestrator renders this chart and injects `operatorNamespace`, `applicationsNamespace`, and the controller image via `ModuleConfig`.
+In product builds, the platform orchestrator renders this chart and injects a single namespace via `ModuleConfig.NamespaceValueKey` (`operatorNamespace` = ApplicationsNamespace), plus the controller image. That one value drives both the operator Deployment and `APPLICATIONS_NAMESPACE` / operand ConfigMap placement.
 
 Verify chart drift in CI or locally:
 
@@ -404,7 +414,7 @@ Run `make help` for the full list. Common targets:
 
 | Target | Description |
 |--------|-------------|
-| `manifests-fetch` | Download upstream manifests to `opt/manifests/` |
+| `manifests-fetch` | Download ODH or RHOAI manifests to `opt/manifests/` (`ODH_PLATFORM_TYPE`) |
 | `manifests` / `generate` | Regenerate CRD/RBAC/webhooks and DeepCopy code |
 | `lint` / `lint-fix` | Run golangci-lint |
 | `test` / `unit-test` | Run Go tests |

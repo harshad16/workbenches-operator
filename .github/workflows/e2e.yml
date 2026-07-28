@@ -1,8 +1,22 @@
 name: E2E Tests
 
 on:
+  push:
+    branches: [main, stable, v1.x]
+    paths:
+      - "cmd/**"
+      - "api/**"
+      - "internal/**"
+      - "Dockerfile"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - "config/**"
+      - "charts/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e.yml"
   pull_request:
-    branches: [main]
+    branches: [main, stable, v1.x]
     paths:
       - "cmd/**"
       - "api/**"
@@ -29,11 +43,11 @@ jobs:
       matrix:
         deploy-method: [kustomize, helm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -73,6 +87,8 @@ jobs:
             deployment/service-ca -n openshift-service-ca
 
       - name: Fetch upstream manifests
+        env:
+          ODH_PLATFORM_TYPE: OpenDataHub
         run: make manifests-fetch
 
       - name: Build operator image
@@ -109,17 +125,22 @@ jobs:
 
       - name: Create applications namespace (helm)
         if: matrix.deploy-method == 'helm'
-        # The Helm chart creates odh-workbenches-config ConfigMap in applicationsNamespace.
-        # In production, opendatahub-operator creates this namespace; in CI we must do it manually.
+        # The Helm chart creates odh-workbenches-config in the resolved applications
+        # namespace (applicationsNamespace, or operatorNamespace when unset). Standalone
+        # Makefile sets APPLICATIONS_NAMESPACE=opendatahub while the operator Deployment
+        # stays in workbenches-operator-system. In production, opendatahub-operator
+        # sets a single operatorNamespace=ApplicationsNamespace for both.
         run: kubectl create namespace opendatahub
 
       - name: Deploy operator with webhooks (helm)
         if: matrix.deploy-method == 'helm'
+        # Append extras; do not replace HELM_DEPLOY_SETS or applicationsNamespace
+        # falls back to operatorNamespace (workbenches-operator-system) and e2e
+        # expectations for opendatahub break.
         run: |
           make helm-deploy \
             IMG=workbenches-operator:e2e \
-            HELM_DEPLOY_SETS="--set webhooks.tlsProvider=certmanager \
-              --set params.workbenchesOperatorImage=workbenches-operator:e2e \
+            HELM_DEPLOY_EXTRA_SETS="--set webhooks.tlsProvider=certmanager \
               --set image.pullPolicy=Never"
 
       # --- shared post-deploy steps ---
@@ -153,7 +174,7 @@ jobs:
 
       - name: Upload logs artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-failure-logs-${{ matrix.deploy-method }}
           path: /tmp/e2e-logs/

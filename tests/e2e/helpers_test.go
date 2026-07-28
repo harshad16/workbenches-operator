@@ -38,13 +38,16 @@ const (
 	webhookTimeout  = 2 * time.Minute
 	webhookInterval = 3 * time.Second
 
-	defaultTestWorkbenchNamespace = "e2e-test-notebooks"
-	webhookTestNamespace          = "e2e-webhook-test"
+	defaultTestApplicationsNamespace = "opendatahub"
+	// Legacy JupyterHub-era notebooks namespace field retained on the CR for
+	// immutability/CEL coverage. Operand deploy uses APPLICATIONS_NAMESPACE.
+	defaultTestLegacyWorkbenchNamespace = "e2e-legacy-notebooks"
+	webhookTestNamespace                = "e2e-webhook-test"
 )
 
-// workbenchNamespace holds the actual workbench namespace used by the CR.
-// It is set during the lifecycle test after the CR is created or fetched.
-var workbenchNamespace string
+// operandNamespace is where notebook-controller operands are deployed
+// (APPLICATIONS_NAMESPACE). Set during lifecycle tests after the CR reconciles.
+var operandNamespace string
 
 func workbenchesCR() *componentsv1alpha1.Workbenches {
 	return &componentsv1alpha1.Workbenches{
@@ -53,7 +56,7 @@ func workbenchesCR() *componentsv1alpha1.Workbenches {
 		},
 		Spec: componentsv1alpha1.WorkbenchesSpec{
 			ManagementState:    "Managed",
-			WorkbenchNamespace: defaultTestWorkbenchNamespace,
+			WorkbenchNamespace: defaultTestLegacyWorkbenchNamespace,
 			Platform:           "OpenDataHub",
 		},
 	}
@@ -161,14 +164,14 @@ func expectDriftRecovery(
 	firstItem func() client.Object,
 	newObj func() client.Object,
 ) {
-	ExpectWithOffset(1, workbenchNamespace).NotTo(BeEmpty())
+	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
 
 	componentLabels := client.MatchingLabels{
 		metadata.ComponentLabelKey: metadata.LabelTrue,
 	}
 
 	ExpectWithOffset(1, k8sClient.List(ctx, list,
-		client.InNamespace(workbenchNamespace),
+		client.InNamespace(operandNamespace),
 		componentLabels,
 	)).To(Succeed())
 
