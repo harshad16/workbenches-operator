@@ -29,16 +29,16 @@ MANIFEST_DIR="${MANIFEST_DIR:-opt/manifests}"
 
 # ODH (upstream) Component Manifests
 declare -A ODH_COMPONENT_MANIFESTS=(
-    ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:main:components/notebook-controller/config"
-    ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:main:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="opendatahub-io:notebooks:main:manifests"
+    ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:v1.10.0-14@9945627f2bbc1fd37c36c528bf41b9d1589d0561:components/notebook-controller/config"
+    ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:v1.10.0-14@9945627f2bbc1fd37c36c528bf41b9d1589d0561:components/odh-notebook-controller/config"
+    ["workbenches/notebooks"]="opendatahub-io:notebooks:v1.47.0@fb31a5a15294d30dbd00043558d9fb3a637fd22a:manifests"
 )
 
 # RHOAI (downstream) Component Manifests
 declare -A RHOAI_COMPONENT_MANIFESTS=(
-    ["workbenches/kf-notebook-controller"]="red-hat-data-services:kubeflow:main:components/notebook-controller/config"
-    ["workbenches/odh-notebook-controller"]="red-hat-data-services:kubeflow:main:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="red-hat-data-services:notebooks:main:manifests"
+    ["workbenches/kf-notebook-controller"]="red-hat-data-services:kubeflow:rhoai-3.5@1998656679e96a2d4244dddce885ce3af5885cd2:components/notebook-controller/config"
+    ["workbenches/odh-notebook-controller"]="red-hat-data-services:kubeflow:rhoai-3.5@1998656679e96a2d4244dddce885ce3af5885cd2:components/odh-notebook-controller/config"
+    ["workbenches/notebooks"]="red-hat-data-services:notebooks:rhoai-3.5@eefbb307bb56595207ee35aa9bc77a58fbfaf365:manifests"
 )
 
 # Select manifests based on platform type (default: OpenDataHub / upstream).

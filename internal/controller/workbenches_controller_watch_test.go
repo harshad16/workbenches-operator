@@ -21,13 +21,20 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
+	"github.com/opendatahub-io/workbenches-operator/internal/platform"
+	"github.com/opendatahub-io/workbenches-operator/internal/platformconfig"
 )
 
 func TestDeploymentAvailabilityChangedPredicateUpdate(t *testing.T) {
@@ -86,63 +93,6 @@ func TestDeploymentAvailabilityChangedPredicateUpdate(t *testing.T) {
 			got := predicate.Update(event.UpdateEvent{ObjectOld: tt.old, ObjectNew: tt.new})
 			if got != tt.want {
 				t.Fatalf("Update() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestMapComponentDeploymentToWorkbenches(t *testing.T) {
-	t.Parallel()
-
-	scheme := runtime.NewScheme()
-	if err := componentsv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	if err := appsv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	wb := &componentsv1alpha1.Workbenches{
-		ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
-		Spec: componentsv1alpha1.WorkbenchesSpec{
-			WorkbenchNamespace: "opendatahub",
-		},
-	}
-
-	reconciler := &WorkbenchesReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(wb).Build(),
-	}
-
-	tests := []struct {
-		name     string
-		deploy   *appsv1.Deployment
-		wantSize int
-	}{
-		{
-			name:     "labeled deployment in workbench namespace",
-			deploy:   deploymentWithLabel("opendatahub", "notebook-controller", true, 1, 1),
-			wantSize: 1,
-		},
-		{
-			name:     "labeled deployment in other namespace",
-			deploy:   deploymentWithLabel("other-ns", "notebook-controller", true, 1, 1),
-			wantSize: 0,
-		},
-		{
-			name:     "unlabeled deployment in workbench namespace",
-			deploy:   deploymentWithLabel("opendatahub", "notebook-controller", false, 1, 1),
-			wantSize: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := reconciler.mapComponentDeploymentToWorkbenches(context.Background(), tt.deploy)
-			if len(got) != tt.wantSize {
-				t.Fatalf("mapComponentDeploymentToWorkbenches() len = %d, want %d", len(got), tt.wantSize)
 			}
 		})
 	}
@@ -214,30 +164,118 @@ func TestHasComponentLabelAndDesiredReplicas(t *testing.T) {
 	}
 }
 
-func TestMapComponentDeploymentToWorkbenchesEdgeCases(t *testing.T) {
+func TestMapPlatformConfigToWorkbenches(t *testing.T) {
 	t.Parallel()
 
 	scheme := runtime.NewScheme()
 	if err := componentsv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
-
-	reconciler := &WorkbenchesReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
 
-	if got := reconciler.mapComponentDeploymentToWorkbenches(
-		context.Background(),
-		&componentsv1alpha1.Workbenches{},
-	); len(got) != 0 {
-		t.Fatalf("mapComponentDeploymentToWorkbenches(invalid type) len = %d, want 0", len(got))
+	t.Run("unset apps ns accepts either default before CR exists", func(t *testing.T) {
+		t.Parallel()
+
+		r := &WorkbenchesReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}
+
+		for _, ns := range []string{
+			platform.DefaultApplicationsNamespaceODH,
+			platform.DefaultApplicationsNamespaceRHOAI,
+		} {
+			got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      platformconfig.ConfigMapName,
+					Namespace: ns,
+				},
+			})
+			if len(got) != 1 {
+				t.Fatalf("namespace %s: len = %d, want 1", ns, len(got))
+			}
+		}
+	})
+
+	t.Run("CR platform selects resolved apps namespace", func(t *testing.T) {
+		t.Parallel()
+
+		wb := &componentsv1alpha1.Workbenches{
+			ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
+			Spec: componentsv1alpha1.WorkbenchesSpec{
+				Platform: "SelfManagedRhoai",
+			},
+		}
+		r := &WorkbenchesReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(wb).Build(),
+		}
+
+		if got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      platformconfig.ConfigMapName,
+				Namespace: platform.DefaultApplicationsNamespaceODH,
+			},
+		}); len(got) != 0 {
+			t.Fatalf("wrong apps ns: len = %d, want 0", len(got))
+		}
+
+		if got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      platformconfig.ConfigMapName,
+				Namespace: platform.DefaultApplicationsNamespaceRHOAI,
+			},
+		}); len(got) != 1 {
+			t.Fatalf("rhoai apps ns: len = %d, want 1", len(got))
+		}
+	})
+}
+
+func TestMapImageStreamToWorkbenches(t *testing.T) {
+	t.Parallel()
+
+	r := &WorkbenchesReconciler{}
+
+	imageStream := &unstructured.Unstructured{}
+	imageStream.SetName("jupyter-minimal-notebook")
+	imageStream.SetNamespace("opendatahub")
+	imageStream.SetGroupVersionKind(gvk.ImageStream)
+
+	reqs := r.mapImageStreamToWorkbenches(context.Background(), imageStream)
+	if len(reqs) != 1 {
+		t.Fatalf("got %d requests, want 1", len(reqs))
+	}
+	if reqs[0].Name != componentsv1alpha1.WorkbenchesInstanceName {
+		t.Fatalf("request name = %q, want %q", reqs[0].Name, componentsv1alpha1.WorkbenchesInstanceName)
 	}
 
-	if got := reconciler.mapComponentDeploymentToWorkbenches(
-		context.Background(),
-		deploymentWithLabel("opendatahub", "notebook-controller", true, 1, 1),
-	); len(got) != 0 {
-		t.Fatalf("mapComponentDeploymentToWorkbenches(missing CR) len = %d, want 0", len(got))
+	// ODH watch-all is filtered here to managed part-of; mapper still always enqueues.
+	reqs = r.mapImageStreamToWorkbenches(context.Background(), nil)
+	if len(reqs) != 1 {
+		t.Fatalf("nil object: got %d requests, want 1", len(reqs))
+	}
+}
+
+func TestShouldWatchImageStreams(t *testing.T) {
+	t.Parallel()
+
+	emptyMapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{})
+	watch, err := shouldWatchImageStreams(emptyMapper)
+	if err != nil {
+		t.Fatalf("empty mapper error = %v", err)
+	}
+	if watch {
+		t.Fatal("empty mapper: watch = true, want false")
+	}
+
+	withIS := meta.NewDefaultRESTMapper([]schema.GroupVersion{gvk.ImageStream.GroupVersion()})
+	withIS.Add(gvk.ImageStream, meta.RESTScopeNamespace)
+	watch, err = shouldWatchImageStreams(withIS)
+	if err != nil {
+		t.Fatalf("mapper with ImageStream error = %v", err)
+	}
+	if !watch {
+		t.Fatal("mapper with ImageStream: watch = false, want true")
 	}
 }
 
