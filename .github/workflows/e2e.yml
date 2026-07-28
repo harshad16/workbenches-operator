@@ -1,8 +1,22 @@
 name: E2E Tests
 
 on:
+  push:
+    branches: [main, stable, v1.x]
+    paths:
+      - "cmd/**"
+      - "api/**"
+      - "internal/**"
+      - "Dockerfile"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - "config/**"
+      - "charts/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e.yml"
   pull_request:
-    branches: [main]
+    branches: [main, stable, v1.x]
     paths:
       - "cmd/**"
       - "api/**"
@@ -29,11 +43,11 @@ jobs:
       matrix:
         deploy-method: [kustomize, helm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -73,6 +87,8 @@ jobs:
             deployment/service-ca -n openshift-service-ca
 
       - name: Fetch upstream manifests
+        env:
+          ODH_PLATFORM_TYPE: OpenDataHub
         run: make manifests-fetch
 
       - name: Build operator image
@@ -153,7 +169,7 @@ jobs:
 
       - name: Upload logs artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-failure-logs-${{ matrix.deploy-method }}
           path: /tmp/e2e-logs/
