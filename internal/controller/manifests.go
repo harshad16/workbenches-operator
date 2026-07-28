@@ -180,6 +180,13 @@ func renderKustomize(kustomizeDir string, params map[string]string) ([]*unstruct
 		return nil, fmt.Errorf("failed to ensure kustomization: %w", err)
 	}
 
+	// Apply RELATED_IMAGE_* overrides onto existing params.env / params-latest.env
+	// keys before merging CR-derived params. Product builds inject digest-pinned
+	// registry.redhat.io images via these env vars on the module-operator pod.
+	if err := applyRelatedImageParams(fSys, kustomizeDir); err != nil {
+		return nil, fmt.Errorf("failed to apply related image params: %w", err)
+	}
+
 	if err := writeParamsEnv(fSys, kustomizeDir, params); err != nil {
 		return nil, fmt.Errorf("failed to write params.env: %w", err)
 	}
@@ -215,7 +222,9 @@ func renderKustomize(kustomizeDir string, params map[string]string) ([]*unstruct
 
 // writeParamsEnv merges operator parameters into the existing params.env file.
 // Existing keys are overwritten; keys not in params are preserved so that
-// upstream image references and other defaults remain intact.
+// upstream image references and other defaults remain intact when RELATED_IMAGE_*
+// env vars are unset. Related-image overrides are applied separately by
+// applyRelatedImageParams before this runs.
 func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[string]string) error {
 	paramsPath := filepath.Join(kustomizeDir, "params.env")
 

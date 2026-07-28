@@ -141,3 +141,10 @@ After modifying manifest sources:
 3. Run `make test` to ensure the controller still renders manifests correctly.
 4. Commit changes to `get_all_manifests.sh` and `opt/manifests/`.
 5. If upstream ClusterRoles changed, sync `config/rbac/rbac_escalate_role.yaml` and `charts/operator/templates/clusterrole-escalate.yaml`.
+6. If `params.env` / `params-latest.env` gained or renamed image keys (common for
+   workbench/runtime ImageStreams when Python or UBI versions change), update
+   `imageParamMap` in `internal/controller/imageparams.go` so
+   `RELATED_IMAGE_*` overrides still apply. Keep that map aligned with the
+   platform module handler's related-image list in
+   [opendatahub-operator `internal/controller/modules/workbenches`](https://github.com/opendatahub-io/opendatahub-operator/tree/main/internal/controller/modules/workbenches)
+   (`relatedImages` / `injectModuleEnv`).
