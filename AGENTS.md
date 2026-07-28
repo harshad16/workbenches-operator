@@ -94,7 +94,8 @@ There are no `test-upgrade`, `test-handler`, or `bundle` Makefile targets.
 ### Manifests
 - Sources and sync process are documented in [DEPENDENCIES.md](DEPENDENCIES.md) and `opt/README.md`.
 - Do not edit files under `opt/manifests/` directly — they are overwritten by `get_all_manifests.sh` / the daily `manifest-sync` workflow.
-- At render time the controller copies the tree, merges CR-derived params into `params.env` (`section-title`, `mlflow-enabled`, `gateway-url`), and applies platform-specific overlays.
+- At render time the controller copies the tree, overlays `RELATED_IMAGE_*` onto existing keys in `params.env` / `params-latest.env` (`imageParamMap` in `internal/controller/imageparams.go`), then merges CR-derived params (`section-title`, `mlflow-enabled`, `gateway-url`), and applies platform-specific overlays.
+- Keep `imageParamMap` in sync when upstream manifests add/rename image keys, and with opendatahub-operator's workbenches module `relatedImages` list (see [DEPENDENCIES.md](DEPENDENCIES.md) "Upgrading Upstream Manifests").
 
 ## CRD
 
