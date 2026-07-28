@@ -30,9 +30,14 @@ help: ## Display this help.
 
 ##@ Development
 
+# ODH_PLATFORM_TYPE selects manifest sources in get_all_manifests.sh:
+#   OpenDataHub (default) — opendatahub-io upstream
+#   rhoai — red-hat-data-services RHOAI/downstream
+ODH_PLATFORM_TYPE ?= OpenDataHub
+
 .PHONY: manifests-fetch
-manifests-fetch: ## Fetch upstream component manifests into opt/manifests/ (for local dev or manual sync).
-	bash get_all_manifests.sh
+manifests-fetch: ## Fetch component manifests into opt/manifests/ (ODH_PLATFORM_TYPE=OpenDataHub|rhoai).
+	env ODH_PLATFORM_TYPE="$(ODH_PLATFORM_TYPE)" bash get_all_manifests.sh
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
@@ -109,12 +114,19 @@ HELM_RELEASE ?= workbenches-operator
 HELM_NAMESPACE ?= workbenches-operator-system
 APPLICATIONS_NAMESPACE ?= opendatahub
 
-# Shared --set flags for standalone cluster installs (override via make, e.g. APPLICATIONS_NAMESPACE=redhat-ods-applications).
+# Shared --set flags for standalone cluster installs.
+# Platform path only sets operatorNamespace (= ApplicationsNamespace); applicationsNamespace
+# is empty in values.yaml and falls back to operatorNamespace. Standalone Makefile keeps
+# a dedicated operator NS by setting both explicitly.
+# Override extras via HELM_DEPLOY_EXTRA_SETS (do not replace HELM_DEPLOY_SETS) so namespace
+# wiring is preserved — e.g. CI webhook/image overrides.
+HELM_DEPLOY_EXTRA_SETS ?=
 HELM_DEPLOY_SETS = \
-	--set operatorNamespace=$(HELM_NAMESPACE) \
-	--set applicationsNamespace=$(APPLICATIONS_NAMESPACE) \
+	--set-string operatorNamespace=$(HELM_NAMESPACE) \
+	--set-string applicationsNamespace=$(APPLICATIONS_NAMESPACE) \
 	--set leaderElection.enabled=false \
-	--set params.workbenchesOperatorImage=$(IMG)
+	--set-string params.workbenchesOperatorImage=$(IMG) \
+	$(HELM_DEPLOY_EXTRA_SETS)
 
 .PHONY: chart-sync-crd
 chart-sync-crd: manifests ## Copy generated Workbenches CRD into the Helm chart (generated; not a second source of truth).
@@ -150,7 +162,8 @@ helm-lint: chart-sync chart-verify-params ## Lint the operator Helm chart.
 helm-template: chart-sync chart-verify-params ## Render the operator Helm chart locally.
 	$(HELM) template "$(HELM_RELEASE)" "$(CHART_DIR)" \
 		--namespace "$(HELM_NAMESPACE)" \
-		--set applicationsNamespace=$(APPLICATIONS_NAMESPACE)
+		--set-string operatorNamespace=$(HELM_NAMESPACE) \
+		--set-string applicationsNamespace=$(APPLICATIONS_NAMESPACE)
 
 .PHONY: helm-deploy
 helm-deploy: chart-sync chart-verify-params ## Deploy operator via Helm (run undeploy first if switching from kustomize).

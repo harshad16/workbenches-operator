@@ -44,23 +44,23 @@ func TestSectionTitle(t *testing.T) {
 	}
 }
 
-func TestDefaultNotebooksNamespace(t *testing.T) {
+func TestDefaultApplicationsNamespace(t *testing.T) {
 	tests := []struct {
 		name     string
 		platform string
 		want     string
 	}{
-		{name: "ODH", platform: platform.OpenDataHub, want: platform.DefaultNotebooksNamespaceODH},
-		{name: "SelfManaged", platform: platform.SelfManagedRhoai, want: platform.DefaultNotebooksNamespaceRHOAI},
-		{name: "unknown defaults to ODH", platform: "unknown", want: platform.DefaultNotebooksNamespaceODH},
-		{name: "empty defaults to ODH", platform: "", want: platform.DefaultNotebooksNamespaceODH},
+		{name: "ODH", platform: platform.OpenDataHub, want: platform.DefaultApplicationsNamespaceODH},
+		{name: "SelfManaged", platform: platform.SelfManagedRhoai, want: platform.DefaultApplicationsNamespaceRHOAI},
+		{name: "unknown defaults to ODH", platform: "unknown", want: platform.DefaultApplicationsNamespaceODH},
+		{name: "empty defaults to ODH", platform: "", want: platform.DefaultApplicationsNamespaceODH},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := platform.DefaultNotebooksNamespace(tt.platform)
+			got := platform.DefaultApplicationsNamespace(tt.platform)
 			if got != tt.want {
-				t.Errorf("DefaultNotebooksNamespace(%q) = %q, want %q", tt.platform, got, tt.want)
+				t.Errorf("DefaultApplicationsNamespace(%q) = %q, want %q", tt.platform, got, tt.want)
 			}
 		})
 	}

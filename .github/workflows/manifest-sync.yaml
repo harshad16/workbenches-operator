@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   sync-manifests:
+    if: github.repository_owner == 'opendatahub-io'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -35,6 +36,8 @@ jobs:
           }
 
       - name: Fetch upstream manifests
+        env:
+          ODH_PLATFORM_TYPE: OpenDataHub
         run: bash get_all_manifests.sh
 
       - uses: actions/setup-go@v7

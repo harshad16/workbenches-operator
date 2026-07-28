@@ -193,6 +193,23 @@ func TestBootstrap_TransientError_ContextDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func TestBootstrap_TransientError_ServerTimeout(t *testing.T) {
+	fetcher := &fakeFetcher{
+		profileErr: errors.NewServerTimeout(schema.GroupResource{
+			Group: "config.openshift.io", Resource: "apiservers",
+		}, "get", 10),
+	}
+
+	result, err := Bootstrap(context.Background(), nil, false, fetcher)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.HasOpenShiftConfigAPI {
+		t.Error("expected HasOpenShiftConfigAPI=true for server timeout (watcher self-healing)")
+	}
+}
+
 func TestBootstrap_TransientError_TooManyRequests(t *testing.T) {
 	fetcher := &fakeFetcher{
 		profileErr: errors.NewTooManyRequestsError("throttled"),
@@ -368,6 +385,7 @@ func TestBootstrap_TransientError_AllTypesClassifiedCorrectly(t *testing.T) {
 	}{
 		{"ServiceUnavailable", errors.NewServiceUnavailable("down")},
 		{"Timeout", errors.NewTimeoutError("slow", 5)},
+		{"ServerTimeout", errors.NewServerTimeout(schema.GroupResource{Group: "config.openshift.io", Resource: "apiservers"}, "get", 10)},
 		{"TooManyRequests", errors.NewTooManyRequestsError("throttled")},
 		{"ContextDeadlineExceeded", context.DeadlineExceeded},
 	}

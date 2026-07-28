@@ -43,8 +43,12 @@ type WorkbenchesSpec struct {
 	// +kubebuilder:validation:Enum=Managed;Removed
 	ManagementState string `json:"managementState,omitempty"`
 
-	// workbenchNamespace is the namespace where workbenches (Notebooks) are deployed.
-	// This field is immutable after initial creation.
+	// workbenchNamespace is a legacy field retained for JupyterHub-era notebook
+	// namespaces (for example rhods-notebooks on RHOAI). The module operator does
+	// not use this field when deploying notebook-controller operands; those always
+	// target the resolved APPLICATIONS_NAMESPACE (falls back by platform to
+	// opendatahub or redhat-ods-applications when unset/invalid). Immutable after
+	// initial creation.
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workbenchNamespace is immutable"
@@ -110,7 +114,16 @@ type WorkbenchesStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Initializing;Ready;Upgrading;Degraded;Failed
 	Phase string `json:"phase,omitempty"`
 
-	// workbenchNamespace reflects the active workbench namespace.
+	// applicationsNamespace is the resolved namespace where notebook-controller
+	// operands and the platform ConfigMap are deployed: APPLICATIONS_NAMESPACE
+	// when set and DNS-1123 valid; otherwise the platform default (opendatahub
+	// for OpenDataHub, redhat-ods-applications for SelfManagedRhoai).
+	// +kubebuilder:validation:MaxLength=63
+	ApplicationsNamespace string `json:"applicationsNamespace,omitempty"`
+
+	// workbenchNamespace echoes spec.workbenchNamespace (legacy JupyterHub-era
+	// notebooks namespace). It is not the operand deploy target; see
+	// status.applicationsNamespace.
 	WorkbenchNamespace string `json:"workbenchNamespace,omitempty"`
 }
 
