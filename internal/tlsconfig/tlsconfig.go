@@ -90,6 +90,7 @@ func DefaultFetcher() ProfileFetcher {
 func isTransientAPIError(err error) bool {
 	return k8serr.IsServiceUnavailable(err) ||
 		k8serr.IsTimeout(err) ||
+		k8serr.IsServerTimeout(err) ||
 		k8serr.IsTooManyRequests(err) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
