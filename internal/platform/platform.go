@@ -23,11 +23,16 @@ const (
 	SelfManagedRhoai = "SelfManagedRhoai"
 )
 
-// Default notebook namespace per platform.
+// Default applications namespaces (operand / platform ConfigMap deploy target).
 const (
-	DefaultNotebooksNamespaceODH   = "opendatahub"
-	DefaultNotebooksNamespaceRHOAI = "rhods-notebooks"
+	DefaultApplicationsNamespaceODH   = "opendatahub"
+	DefaultApplicationsNamespaceRHOAI = "redhat-ods-applications"
 )
+
+// LegacyWorkbenchNamespaceRHOAI is the historical JupyterHub-era notebooks
+// namespace default on RHOAI (spec.workbenchNamespace only; not used for
+// operand deploy).
+const LegacyWorkbenchNamespaceRHOAI = "rhods-notebooks"
 
 // IsValid reports whether platformType is a recognized platform value.
 func IsValid(platformType string) bool {
@@ -53,12 +58,14 @@ func SectionTitle(platformType string) string {
 	return titles[OpenDataHub]
 }
 
-// DefaultNotebooksNamespace returns the default workbench namespace for the given platform.
-func DefaultNotebooksNamespace(platformType string) string {
+// DefaultApplicationsNamespace returns the fallback applications namespace
+// when APPLICATIONS_NAMESPACE is unset: opendatahub for ODH (and unknown),
+// redhat-ods-applications for SelfManagedRhoai.
+func DefaultApplicationsNamespace(platformType string) string {
 	switch platformType {
 	case SelfManagedRhoai:
-		return DefaultNotebooksNamespaceRHOAI
+		return DefaultApplicationsNamespaceRHOAI
 	default:
-		return DefaultNotebooksNamespaceODH
+		return DefaultApplicationsNamespaceODH
 	}
 }

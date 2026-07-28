@@ -4,6 +4,10 @@ metadata:
   name: default-workbenches
 spec:
   managementState: Managed
+  # Legacy JupyterHub-era notebooks namespace (immutable). Ignored for operand deploy.
+  # Operands and odh-workbenches-config use the resolved applications namespace:
+  # APPLICATIONS_NAMESPACE when set; otherwise platform default (opendatahub /
+  # redhat-ods-applications).
   workbenchNamespace: opendatahub
   # Possible values: OpenDataHub, SelfManagedRhoai
   platform: OpenDataHub

@@ -26,7 +26,6 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 	"github.com/opendatahub-io/workbenches-operator/internal/tlsconfig"
 )
 
@@ -38,27 +37,33 @@ func TestResolveApplicationsNamespace(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "unset falls back to default",
+			name:   "unset leaves empty for reconciler platform fallback",
 			setEnv: false,
-			want:   platform.DefaultNotebooksNamespaceODH,
+			want:   "",
 		},
 		{
-			name:   "empty falls back to default",
+			name:   "empty leaves empty for reconciler platform fallback",
 			env:    "",
 			setEnv: true,
-			want:   platform.DefaultNotebooksNamespaceODH,
+			want:   "",
 		},
 		{
-			name:   "invalid DNS label falls back to default",
+			name:   "invalid DNS label leaves empty for reconciler platform fallback",
 			env:    "Invalid_Namespace",
 			setEnv: true,
-			want:   platform.DefaultNotebooksNamespaceODH,
+			want:   "",
 		},
 		{
 			name:   "valid namespace is kept",
 			env:    "opendatahub",
 			setEnv: true,
 			want:   "opendatahub",
+		},
+		{
+			name:   "rhoai applications namespace is kept",
+			env:    "redhat-ods-applications",
+			setEnv: true,
+			want:   "redhat-ods-applications",
 		},
 	}
 

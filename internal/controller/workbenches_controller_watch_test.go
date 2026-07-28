@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -28,6 +29,8 @@ import (
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
+	"github.com/opendatahub-io/workbenches-operator/internal/platform"
+	"github.com/opendatahub-io/workbenches-operator/internal/platformconfig"
 )
 
 func TestDeploymentAvailabilityChangedPredicateUpdate(t *testing.T) {
@@ -103,15 +106,23 @@ func TestMapComponentDeploymentToWorkbenches(t *testing.T) {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 
+	const (
+		legacyNamespace = "rhods-notebooks"
+		appsNamespace   = "redhat-ods-applications"
+	)
+
 	wb := &componentsv1alpha1.Workbenches{
 		ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
 		Spec: componentsv1alpha1.WorkbenchesSpec{
-			WorkbenchNamespace: "opendatahub",
+			// Distinct from ApplicationsNamespace so mapping cannot accidentally
+			// succeed by reading Spec.WorkbenchNamespace.
+			WorkbenchNamespace: legacyNamespace,
 		},
 	}
 
 	reconciler := &WorkbenchesReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(wb).Build(),
+		Client:                fake.NewClientBuilder().WithScheme(scheme).WithObjects(wb).Build(),
+		ApplicationsNamespace: appsNamespace,
 	}
 
 	tests := []struct {
@@ -120,9 +131,14 @@ func TestMapComponentDeploymentToWorkbenches(t *testing.T) {
 		wantSize int
 	}{
 		{
-			name:     "labeled deployment in workbench namespace",
-			deploy:   deploymentWithLabel("opendatahub", "notebook-controller", true, 1, 1),
+			name:     "labeled deployment in applications namespace",
+			deploy:   deploymentWithLabel(appsNamespace, "notebook-controller", true, 1, 1),
 			wantSize: 1,
+		},
+		{
+			name:     "labeled deployment in legacy workbench namespace",
+			deploy:   deploymentWithLabel(legacyNamespace, "notebook-controller", true, 1, 1),
+			wantSize: 0,
 		},
 		{
 			name:     "labeled deployment in other namespace",
@@ -130,8 +146,8 @@ func TestMapComponentDeploymentToWorkbenches(t *testing.T) {
 			wantSize: 0,
 		},
 		{
-			name:     "unlabeled deployment in workbench namespace",
-			deploy:   deploymentWithLabel("opendatahub", "notebook-controller", false, 1, 1),
+			name:     "unlabeled deployment in applications namespace",
+			deploy:   deploymentWithLabel(appsNamespace, "notebook-controller", false, 1, 1),
 			wantSize: 0,
 		},
 	}
@@ -212,6 +228,73 @@ func TestHasComponentLabelAndDesiredReplicas(t *testing.T) {
 	if got := deploymentDesiredReplicas(withReplicas); got != 3 {
 		t.Fatalf("deploymentDesiredReplicas(3) = %d, want 3", got)
 	}
+}
+
+func TestMapPlatformConfigToWorkbenches(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := componentsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(corev1) error = %v", err)
+	}
+
+	t.Run("unset apps ns accepts either default before CR exists", func(t *testing.T) {
+		t.Parallel()
+
+		r := &WorkbenchesReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}
+
+		for _, ns := range []string{
+			platform.DefaultApplicationsNamespaceODH,
+			platform.DefaultApplicationsNamespaceRHOAI,
+		} {
+			got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      platformconfig.ConfigMapName,
+					Namespace: ns,
+				},
+			})
+			if len(got) != 1 {
+				t.Fatalf("namespace %s: len = %d, want 1", ns, len(got))
+			}
+		}
+	})
+
+	t.Run("CR platform selects resolved apps namespace", func(t *testing.T) {
+		t.Parallel()
+
+		wb := &componentsv1alpha1.Workbenches{
+			ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
+			Spec: componentsv1alpha1.WorkbenchesSpec{
+				Platform: "SelfManagedRhoai",
+			},
+		}
+		r := &WorkbenchesReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(wb).Build(),
+		}
+
+		if got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      platformconfig.ConfigMapName,
+				Namespace: platform.DefaultApplicationsNamespaceODH,
+			},
+		}); len(got) != 0 {
+			t.Fatalf("wrong apps ns: len = %d, want 0", len(got))
+		}
+
+		if got := r.mapPlatformConfigToWorkbenches(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      platformconfig.ConfigMapName,
+				Namespace: platform.DefaultApplicationsNamespaceRHOAI,
+			},
+		}); len(got) != 1 {
+			t.Fatalf("rhoai apps ns: len = %d, want 1", len(got))
+		}
+	})
 }
 
 func TestMapComponentDeploymentToWorkbenchesEdgeCases(t *testing.T) {

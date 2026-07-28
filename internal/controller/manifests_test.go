@@ -896,8 +896,9 @@ func TestReconcileDeleteReturnsErrorWhenCleanupFails(t *testing.T) {
 		Build()
 
 	reconciler := &WorkbenchesReconciler{
-		Client: fakeClient,
-		Scheme: scheme,
+		Client:                fakeClient,
+		Scheme:                scheme,
+		ApplicationsNamespace: namespace,
 	}
 
 	wb := &componentsv1alpha1.Workbenches{
