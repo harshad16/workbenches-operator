@@ -26,6 +26,7 @@ import (
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
+	imagev1 "github.com/openshift/api/image/v1"
 	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -61,6 +62,7 @@ func init() {
 	utilruntime.Must(admissionregistrationv1.AddToScheme(scheme))
 	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(configv1.Install(scheme))
+	utilruntime.Must(imagev1.Install(scheme))
 }
 
 func main() {
