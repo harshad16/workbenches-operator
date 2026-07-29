@@ -20,6 +20,7 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	metadata "github.com/opendatahub-io/workbenches-operator/internal/metadata"
 )
 
@@ -149,10 +151,33 @@ func newNotebook(name string, annotations map[string]string) *unstructured.Unstr
 }
 
 func notebookGVK() schema.GroupVersionKind {
-	return schema.GroupVersionKind{
-		Group:   "kubeflow.org",
-		Version: "v1",
-		Kind:    "Notebook",
+	return gvk.Notebook
+}
+
+func hwpGVK() schema.GroupVersionKind {
+	return gvk.HardwareProfile
+}
+
+func newHardwareProfile(name string, spec map[string]any) *unstructured.Unstructured {
+	hwp := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": gvk.HardwareProfile.Group + "/" + gvk.HardwareProfile.Version,
+			"kind":       gvk.HardwareProfile.Kind,
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": webhookTestNamespace,
+			},
+			"spec": spec,
+		},
+	}
+
+	return hwp
+}
+
+func ensureCreated(obj client.Object) {
+	err := k8sClient.Create(ctx, obj)
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	}
 }
 
