@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -668,8 +669,27 @@ func (r *WorkbenchesReconciler) setReadyCondition(
 }
 
 func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *componentsv1alpha1.Workbenches) error {
+	appsNS := r.resolveOperandNamespace(wb.Spec.Platform)
+	if err := r.ensureGeneratedNamespace(ctx, wb, appsNS, "applications"); err != nil {
+		return fmt.Errorf("applications namespace: %w", err)
+	}
+
+	legacyNS := r.resolveLegacyWorkbenchNamespace(wb)
+	if legacyNS != appsNS {
+		if err := r.ensureGeneratedNamespace(ctx, wb, legacyNS, "legacy workbench"); err != nil {
+			return fmt.Errorf("legacy workbench namespace: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *WorkbenchesReconciler) ensureGeneratedNamespace(
+	ctx context.Context,
+	_ *componentsv1alpha1.Workbenches,
+	nsName, purpose string,
+) error {
 	l := log.FromContext(ctx)
-	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
 
 	ns := &corev1.Namespace{}
 
@@ -679,8 +699,10 @@ func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *c
 			return fmt.Errorf("failed to get namespace %s: %w", nsName, err)
 		}
 
-		l.Info("creating applications namespace for workbench operands", "namespace", nsName)
+		l.Info("creating namespace for workbenches", "namespace", nsName, "purpose", purpose)
 
+		// Label only — do not set controller ownerReferences on Namespaces. Legacy
+		// workbench namespaces may hold user notebooks that must survive CR deletion.
 		ns = &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: nsName,
@@ -733,13 +755,24 @@ func (r *WorkbenchesReconciler) setStatusNamespaces(wb *componentsv1alpha1.Workb
 //
 // Prefer APPLICATIONS_NAMESPACE when configured on the reconciler. Otherwise
 // fall back by platform: opendatahub (ODH/default) or redhat-ods-applications
-// (SelfManagedRhoai). Spec.WorkbenchNamespace is legacy-only and is not used.
+// (SelfManagedRhoai). Spec.WorkbenchNamespace is not used for operand deploy.
 func (r *WorkbenchesReconciler) resolveOperandNamespace(platformType string) string {
-	if r.ApplicationsNamespace != "" {
+	if r.ApplicationsNamespace != "" && len(validation.IsDNS1123Label(r.ApplicationsNamespace)) == 0 {
 		return r.ApplicationsNamespace
 	}
 
 	return platform.DefaultApplicationsNamespace(platformType)
+}
+
+// resolveLegacyWorkbenchNamespace returns the JupyterHub-era notebooks namespace
+// ensured for legacy Notebook CR placement (dashboard / upgraded clusters).
+// Uses spec.workbenchNamespace when set; otherwise platform defaults apply.
+func (r *WorkbenchesReconciler) resolveLegacyWorkbenchNamespace(wb *componentsv1alpha1.Workbenches) string {
+	if wb.Spec.WorkbenchNamespace != "" {
+		return wb.Spec.WorkbenchNamespace
+	}
+
+	return platform.DefaultLegacyWorkbenchNamespace(wb.Spec.Platform)
 }
 
 func (r *WorkbenchesReconciler) computeKustomizeParams(wb *componentsv1alpha1.Workbenches) map[string]string {
