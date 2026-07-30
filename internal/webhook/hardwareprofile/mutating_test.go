@@ -17,7 +17,10 @@ limitations under the License.
 package hardwareprofile_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
@@ -66,9 +71,10 @@ func createInjector(t *testing.T, s *runtime.Scheme, objects ...runtime.Object) 
 	cli := builder.Build()
 
 	return &hardwareprofile.Injector{
-		Client:  cli,
-		Decoder: admission.NewDecoder(s),
-		Name:    "test",
+		Client:      cli,
+		EventWriter: cli,
+		Decoder:     admission.NewDecoder(s),
+		Name:        "test",
 	}
 }
 
@@ -146,6 +152,26 @@ func newHWP(name, namespace string, identifiers []any, nodeSelector map[string]a
 				"namespace": namespace,
 			},
 			"spec": spec,
+		},
+	}
+}
+
+func newKueueHWP(name, queueName string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": gvk.HardwareProfile.Group + "/" + gvk.HardwareProfile.Version,
+			"kind":       gvk.HardwareProfile.Kind,
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": testNamespace,
+			},
+			"spec": map[string]any{
+				"scheduling": map[string]any{
+					"kueue": map[string]any{
+						"localQueueName": queueName,
+					},
+				},
+			},
 		},
 	}
 }
@@ -1426,6 +1452,359 @@ func TestHardwareProfile_DeletionTimestamp(t *testing.T) {
 	g.Expect(resp.Allowed).Should(BeTrue())
 	g.Expect(resp.Result.Message).Should(ContainSubstring("marked for deletion"))
 	g.Expect(resp.Patches).Should(BeEmpty())
+}
+
+func TestHardwareProfile_AppliesKueueLabel(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	hwp := newKueueHWP(testHardwareProfile, "my-queue")
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	foundLabelPatch := false
+	for _, patch := range resp.Patches {
+		if strings.Contains(patch.Path, "labels") {
+			if strings.Contains(fmt.Sprintf("%v", patch.Value), "my-queue") {
+				foundLabelPatch = true
+			}
+		}
+	}
+
+	g.Expect(foundLabelPatch).Should(BeTrue(),
+		"Should have a patch setting the Kueue queue-name label")
+}
+
+func TestHardwareProfile_KueueSkipsNodeScheduling(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	// HWP with BOTH Kueue AND node scheduling — Kueue takes precedence
+	hwpObj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": gvk.HardwareProfile.Group + "/" + gvk.HardwareProfile.Version,
+			"kind":       gvk.HardwareProfile.Kind,
+			"metadata": map[string]any{
+				"name":      testHardwareProfile,
+				"namespace": testNamespace,
+			},
+			"spec": map[string]any{
+				"scheduling": map[string]any{
+					"kueue": map[string]any{
+						"localQueueName": "gpu-queue",
+					},
+					"node": map[string]any{
+						"nodeSelector": map[string]any{"gpu": "true"},
+						"tolerations": []any{map[string]any{
+							"key": "gpu", "operator": "Exists", "effect": "NoSchedule",
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	injector := createInjector(t, s, hwpObj)
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	// Should NOT have nodeSelector or tolerations patches
+	for _, patch := range resp.Patches {
+		g.Expect(patch.Path).ShouldNot(ContainSubstring("nodeSelector"),
+			"Kueue scheduling should skip nodeSelector")
+		g.Expect(patch.Path).ShouldNot(ContainSubstring("tolerations"),
+			"Kueue scheduling should skip tolerations")
+	}
+}
+
+func TestHardwareProfile_KueueLabelOverrideWarning(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	hwp := newKueueHWP(testHardwareProfile, "new-queue")
+	injector := createInjector(t, s, hwp)
+
+	// Notebook already has a different Kueue label
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	nb.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "old-queue"})
+	oldNB := newNotebook(hwpAnnotations(testHardwareProfile))
+	oldNB.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "old-queue"})
+
+	req := newUpdateAdmissionRequest(t, nb, oldNB)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty(),
+		"Should warn when Kueue label is being overwritten")
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("old-queue"))
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("new-queue"))
+}
+
+func TestHardwareProfile_NoKueueWarningWhenLabelUnchanged(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	hwp := newKueueHWP(testHardwareProfile, "same-queue")
+	injector := createInjector(t, s, hwp)
+
+	// Notebook already has the same Kueue label
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	nb.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "same-queue"})
+	oldNB := newNotebook(hwpAnnotations(testHardwareProfile))
+	oldNB.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "same-queue"})
+
+	req := newUpdateAdmissionRequest(t, nb, oldNB)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+	g.Expect(resp.Warnings).Should(BeEmpty(),
+		"Should NOT warn when Kueue label matches the HWP value")
+}
+
+func TestHardwareProfile_ProfileChangeRemovesKueueLabel(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	// New profile has node scheduling (no Kueue)
+	newHWPObj := newHWP("new-profile", testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+	injector := createInjector(t, s, newHWPObj)
+
+	// Notebook switches from old Kueue profile to new node-scheduling profile
+	nb := newNotebook(hwpAnnotations("new-profile"))
+	nb.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "old-queue"})
+	oldNB := newNotebook(hwpAnnotations("old-kueue-profile"))
+	oldNB.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "old-queue"})
+
+	req := newUpdateAdmissionRequest(t, nb, oldNB)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	// The Kueue label should be removed (profile change clears it)
+	foundLabelRemoval := false
+	for _, patch := range resp.Patches {
+		if strings.Contains(patch.Path, "labels") {
+			if !strings.Contains(fmt.Sprintf("%v", patch.Value), "kueue.x-k8s.io/queue-name") {
+				foundLabelRemoval = true
+			}
+		}
+	}
+
+	g.Expect(foundLabelRemoval).Should(BeTrue(),
+		"Profile change should remove the old Kueue label")
+}
+
+func TestHardwareProfile_HWPRemovalClearsKueueLabel(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	// Register the old HWP (Kueue-based) so removal can fetch it
+	oldHWP := newKueueHWP("kueue-profile", "my-queue")
+	injector := createInjector(t, s, oldHWP)
+
+	// Old notebook had the Kueue profile; new notebook removes the annotation
+	oldNB := newNotebook(hwpAnnotationsWithNamespace("kueue-profile", testNamespace))
+	oldNB.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "my-queue"})
+
+	newNB := newNotebook(map[string]string{
+		metadata.HardwareProfileNamespaceAnnotation: testNamespace,
+	})
+	newNB.SetLabels(map[string]string{"kueue.x-k8s.io/queue-name": "my-queue"})
+
+	req := newUpdateAdmissionRequest(t, newNB, oldNB)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	// Should have a patch removing the Kueue label
+	foundKueueRemoval := false
+	for _, patch := range resp.Patches {
+		if strings.Contains(patch.Path, "labels") {
+			if !strings.Contains(fmt.Sprintf("%v", patch.Value), "kueue.x-k8s.io/queue-name") {
+				foundKueueRemoval = true
+			}
+		}
+	}
+
+	g.Expect(foundKueueRemoval).Should(BeTrue(),
+		"HWP removal should clear the Kueue queue-name label")
+}
+
+func TestHardwareProfile_InvalidKueueLabelValueDenied(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	// localQueueName exceeds 63 chars — invalid as a Kubernetes label value
+	longName := "this-queue-name-is-way-too-long-for-a-kubernetes-label-value-and-exceeds-63-chars"
+	hwp := newKueueHWP(testHardwareProfile, longName)
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeFalse(), "Should deny when localQueueName is an invalid label value")
+	g.Expect(resp.Result.Message).Should(ContainSubstring("invalid localQueueName"))
+}
+
+func TestHardwareProfile_NonStringKueueValueDenied(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+
+	// localQueueName is a non-string type (integer) — NestedString returns an error
+	hwp := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": gvk.HardwareProfile.Group + "/" + gvk.HardwareProfile.Version,
+			"kind":       gvk.HardwareProfile.Kind,
+			"metadata": map[string]any{
+				"name":      testHardwareProfile,
+				"namespace": testNamespace,
+			},
+			"spec": map[string]any{
+				"scheduling": map[string]any{
+					"kueue": map[string]any{
+						"localQueueName": int64(12345),
+					},
+				},
+			},
+		},
+	}
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeFalse(), "Should deny when localQueueName is not a string")
+	g.Expect(resp.Result.Message).Should(ContainSubstring("localQueueName"))
+}
+
+func TestHardwareProfile_ContainerNameMismatchEmitsEvent(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	containers := []any{
+		map[string]any{"name": "container-a", "image": "notebook:latest", "resources": map[string]any{}},
+		map[string]any{"name": "container-b", "image": "oauth-proxy:latest", "resources": map[string]any{}},
+	}
+	_ = unstructured.SetNestedSlice(nb.Object, containers, "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty())
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("rename your container to '"+testNotebook+"'"),
+		"Warning should include rename hint")
+
+	events := &corev1.EventList{}
+	g.Expect(injector.Client.List(t.Context(), events,
+		client.InNamespace(testNamespace))).Should(Succeed())
+
+	g.Expect(events.Items).Should(HaveLen(1))
+	event := events.Items[0]
+	g.Expect(event.Reason).Should(Equal("ContainerNameMismatch"))
+	g.Expect(event.Type).Should(Equal(corev1.EventTypeWarning))
+	g.Expect(event.Message).Should(ContainSubstring(testHardwareProfile))
+	g.Expect(event.Message).Should(ContainSubstring(testNotebook))
+	g.Expect(event.InvolvedObject.Name).Should(Equal(testNotebook))
+	g.Expect(event.InvolvedObject.Namespace).Should(Equal(testNamespace))
+}
+
+func TestHardwareProfile_ValidationErrorEmitsEvent(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	injector := createInjector(t, s, hwp)
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	// Set containers to an invalid structure to trigger a non-mismatch validation error
+	_ = unstructured.SetNestedField(nb.Object, "not-a-slice", "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+	g.Expect(resp.Allowed).Should(BeTrue())
+
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty())
+	g.Expect(resp.Warnings[0]).Should(ContainSubstring("validation error"))
+
+	events := &corev1.EventList{}
+	g.Expect(injector.Client.List(t.Context(), events,
+		client.InNamespace(testNamespace))).Should(Succeed())
+
+	g.Expect(events.Items).Should(HaveLen(1))
+	event := events.Items[0]
+	g.Expect(event.Reason).Should(Equal("ValidationError"))
+	g.Expect(event.Type).Should(Equal(corev1.EventTypeWarning))
+	g.Expect(event.Message).Should(ContainSubstring(testHardwareProfile))
+	g.Expect(event.InvolvedObject.Name).Should(Equal(testNotebook))
+	g.Expect(event.InvolvedObject.Namespace).Should(Equal(testNamespace))
+}
+
+func TestHardwareProfile_EventCreationFailureDoesNotBlockAdmission(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	s := newScheme(t)
+	hwp := newHWP(testHardwareProfile, testNamespace, nil,
+		map[string]any{"cpu-node": "true"}, nil)
+
+	// Create injector with a client that will reject event creation
+	cli := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(hwp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isEvent := obj.(*corev1.Event); isEvent {
+					return errors.New("simulated event creation failure")
+				}
+
+				return c.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	injector := &hardwareprofile.Injector{
+		Client:      cli,
+		EventWriter: cli,
+		Decoder:     admission.NewDecoder(s),
+		Name:        "test",
+	}
+
+	nb := newNotebook(hwpAnnotations(testHardwareProfile))
+	containers := []any{
+		map[string]any{"name": "container-a", "image": "notebook:latest", "resources": map[string]any{}},
+		map[string]any{"name": "container-b", "image": "oauth-proxy:latest", "resources": map[string]any{}},
+	}
+	_ = unstructured.SetNestedSlice(nb.Object, containers, "spec", "template", "spec", "containers")
+
+	req := newAdmissionRequest(t, admissionv1.Create, nb, gvk.Notebook)
+	resp := injector.Handle(t.Context(), req)
+
+	g.Expect(resp.Allowed).Should(BeTrue(), "Admission must succeed even if event creation fails")
+	g.Expect(resp.Warnings).ShouldNot(BeEmpty(), "Warning should still be present")
 }
 
 func TestParseQuantityValue(t *testing.T) {

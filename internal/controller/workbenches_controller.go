@@ -64,6 +64,7 @@ const (
 	// ImageStreamsAvailable is informational only (matches ODH); it does not gate Ready.
 	conditionTypeImageStreamsAvailable  = "ImageStreamsAvailable"
 	conditionReasonImageStreamsNotReady = "ImageStreamsNotReady"
+	conditionReasonUnknown              = "Unknown"
 	conditionReasonAvailable            = "Available"
 	requeueDelay                        = 30 * time.Second
 
@@ -196,14 +197,21 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // only that namespace; otherwise watch both platform defaults until CR platform
 // selects one.
 func (r *WorkbenchesReconciler) platformConfigWatchNamespaces() []string {
-	if r.ApplicationsNamespace != "" {
-		return []string{r.ApplicationsNamespace}
+	if ns := r.configuredApplicationsNamespace(); ns != "" {
+		return []string{ns}
 	}
 
 	return []string{
 		platform.DefaultApplicationsNamespaceODH,
 		platform.DefaultApplicationsNamespaceRHOAI,
 	}
+}
+
+// configuredApplicationsNamespace returns ApplicationsNamespace when it is a valid
+// DNS-1123 label. Invalid values are ignored so reconcile and ConfigMap watches
+// fall back to platform defaults consistently.
+func (r *WorkbenchesReconciler) configuredApplicationsNamespace() string {
+	return platform.ValidApplicationsNamespace(r.ApplicationsNamespace)
 }
 
 func shouldWatchImageStreams(mapper meta.RESTMapper) (bool, error) {
@@ -370,6 +378,8 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	wb.Status.Distribution = componentsv1alpha1.Distribution{}
 	wb.Status.ObservedGeneration = wb.Generation
 
+	sanitizeConditions(wb.Status.Conditions)
+
 	err := r.Status().Update(ctx, wb)
 
 	return ctrl.Result{}, err
@@ -399,6 +409,8 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 
 	if wb.Status.Phase == "" && wb.Status.ObservedGeneration == 0 {
 		wb.Status.Phase = statusutil.PhasePending
+
+		sanitizeConditions(wb.Status.Conditions)
 
 		if err := r.Status().Update(ctx, wb); err != nil {
 			l.Error(err, "failed to update Pending status")
@@ -515,6 +527,8 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 	phaseCtx.Degraded = meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeDegraded)
 	phaseCtx.ProvisioningSucceeded = meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeProvisioningSucceeded)
 	wb.Status.Phase = statusutil.ComputePhase(phaseCtx)
+
+	sanitizeConditions(wb.Status.Conditions)
 
 	err = r.Status().Update(ctx, wb)
 	if err != nil {
@@ -668,8 +682,26 @@ func (r *WorkbenchesReconciler) setReadyCondition(
 }
 
 func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *componentsv1alpha1.Workbenches) error {
+	appsNS := r.resolveOperandNamespace(wb.Spec.Platform)
+	if err := r.ensureGeneratedNamespace(ctx, appsNS, "applications"); err != nil {
+		return fmt.Errorf("applications namespace: %w", err)
+	}
+
+	legacyNS := r.resolveLegacyWorkbenchNamespace(wb)
+	if legacyNS != appsNS {
+		if err := r.ensureGeneratedNamespace(ctx, legacyNS, "legacy workbench"); err != nil {
+			return fmt.Errorf("legacy workbench namespace: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *WorkbenchesReconciler) ensureGeneratedNamespace(
+	ctx context.Context,
+	nsName, purpose string,
+) error {
 	l := log.FromContext(ctx)
-	nsName := r.resolveOperandNamespace(wb.Spec.Platform)
 
 	ns := &corev1.Namespace{}
 
@@ -679,8 +711,10 @@ func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *c
 			return fmt.Errorf("failed to get namespace %s: %w", nsName, err)
 		}
 
-		l.Info("creating applications namespace for workbench operands", "namespace", nsName)
+		l.Info("creating namespace for workbenches", "namespace", nsName, "purpose", purpose)
 
+		// Label only — do not set controller ownerReferences on Namespaces. Legacy
+		// workbench namespaces may hold user notebooks that must survive CR deletion.
 		ns = &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: nsName,
@@ -733,13 +767,24 @@ func (r *WorkbenchesReconciler) setStatusNamespaces(wb *componentsv1alpha1.Workb
 //
 // Prefer APPLICATIONS_NAMESPACE when configured on the reconciler. Otherwise
 // fall back by platform: opendatahub (ODH/default) or redhat-ods-applications
-// (SelfManagedRhoai). Spec.WorkbenchNamespace is legacy-only and is not used.
+// (SelfManagedRhoai). Spec.WorkbenchNamespace is not used for operand deploy.
 func (r *WorkbenchesReconciler) resolveOperandNamespace(platformType string) string {
-	if r.ApplicationsNamespace != "" {
-		return r.ApplicationsNamespace
+	if ns := r.configuredApplicationsNamespace(); ns != "" {
+		return ns
 	}
 
 	return platform.DefaultApplicationsNamespace(platformType)
+}
+
+// resolveLegacyWorkbenchNamespace returns the JupyterHub-era notebooks namespace
+// ensured for legacy Notebook CR placement (dashboard / upgraded clusters).
+// Uses spec.workbenchNamespace when set; otherwise platform defaults apply.
+func (r *WorkbenchesReconciler) resolveLegacyWorkbenchNamespace(wb *componentsv1alpha1.Workbenches) string {
+	if wb.Spec.WorkbenchNamespace != "" {
+		return wb.Spec.WorkbenchNamespace
+	}
+
+	return platform.DefaultLegacyWorkbenchNamespace(wb.Spec.Platform)
 }
 
 func (r *WorkbenchesReconciler) computeKustomizeParams(wb *componentsv1alpha1.Workbenches) map[string]string {
@@ -794,11 +839,24 @@ func (r *WorkbenchesReconciler) setErrorStatus(
 	wb.Status.Phase = statusutil.ComputePhase(statusutil.PhaseContext{Failed: true})
 	wb.Status.ObservedGeneration = wb.Generation
 
+	sanitizeConditions(wb.Status.Conditions)
+
 	if err := r.Status().Update(ctx, wb); err != nil {
 		log.FromContext(ctx).Error(err, "failed to update error status")
 	}
 
 	return ctrl.Result{}, reconcileErr
+}
+
+// sanitizeConditions ensures every condition has a non-empty Reason.
+// Foreign conditions (set by other controllers or the platform orchestrator) may
+// violate the Kubernetes validation rule that reason must be >= 1 character.
+func sanitizeConditions(conditions []metav1.Condition) {
+	for i := range conditions {
+		if conditions[i].Reason == "" {
+			conditions[i].Reason = conditionReasonUnknown
+		}
+	}
 }
 
 // deploymentsAvailability reports whether all component deployments have the desired

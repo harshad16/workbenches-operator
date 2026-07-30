@@ -32,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -275,16 +274,16 @@ func configureWebhookServingCerts(cfg *rest.Config, cli client.Client, enableWeb
 var webhookTLSConfigure = webhooktls.Configure
 
 func resolveApplicationsNamespace() string {
-	provided := strings.TrimSpace(os.Getenv("APPLICATIONS_NAMESPACE"))
-	if provided != "" && len(validation.IsDNS1123Label(provided)) == 0 {
-		return provided
+	provided := os.Getenv("APPLICATIONS_NAMESPACE")
+	if valid := platform.ValidApplicationsNamespace(provided); valid != "" {
+		return valid
 	}
 
 	// Leave empty so the reconciler can fall back from Workbenches.spec.platform
 	// (opendatahub vs redhat-ods-applications). Product installs always inject the env.
 	// setupLog is intentional here: this runs during process startup before a
 	// reconcile context exists.
-	if provided == "" {
+	if strings.TrimSpace(provided) == "" {
 		setupLog.Info("APPLICATIONS_NAMESPACE not set; reconciler will use platform default")
 	} else {
 		setupLog.Info("APPLICATIONS_NAMESPACE invalid; reconciler will use platform default",
