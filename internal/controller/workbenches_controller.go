@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -197,14 +196,21 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // only that namespace; otherwise watch both platform defaults until CR platform
 // selects one.
 func (r *WorkbenchesReconciler) platformConfigWatchNamespaces() []string {
-	if r.ApplicationsNamespace != "" {
-		return []string{r.ApplicationsNamespace}
+	if ns := r.configuredApplicationsNamespace(); ns != "" {
+		return []string{ns}
 	}
 
 	return []string{
 		platform.DefaultApplicationsNamespaceODH,
 		platform.DefaultApplicationsNamespaceRHOAI,
 	}
+}
+
+// configuredApplicationsNamespace returns ApplicationsNamespace when it is a valid
+// DNS-1123 label. Invalid values are ignored so reconcile and ConfigMap watches
+// fall back to platform defaults consistently.
+func (r *WorkbenchesReconciler) configuredApplicationsNamespace() string {
+	return platform.ValidApplicationsNamespace(r.ApplicationsNamespace)
 }
 
 func shouldWatchImageStreams(mapper meta.RESTMapper) (bool, error) {
@@ -670,13 +676,13 @@ func (r *WorkbenchesReconciler) setReadyCondition(
 
 func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *componentsv1alpha1.Workbenches) error {
 	appsNS := r.resolveOperandNamespace(wb.Spec.Platform)
-	if err := r.ensureGeneratedNamespace(ctx, wb, appsNS, "applications"); err != nil {
+	if err := r.ensureGeneratedNamespace(ctx, appsNS, "applications"); err != nil {
 		return fmt.Errorf("applications namespace: %w", err)
 	}
 
 	legacyNS := r.resolveLegacyWorkbenchNamespace(wb)
 	if legacyNS != appsNS {
-		if err := r.ensureGeneratedNamespace(ctx, wb, legacyNS, "legacy workbench"); err != nil {
+		if err := r.ensureGeneratedNamespace(ctx, legacyNS, "legacy workbench"); err != nil {
 			return fmt.Errorf("legacy workbench namespace: %w", err)
 		}
 	}
@@ -686,7 +692,6 @@ func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *c
 
 func (r *WorkbenchesReconciler) ensureGeneratedNamespace(
 	ctx context.Context,
-	_ *componentsv1alpha1.Workbenches,
 	nsName, purpose string,
 ) error {
 	l := log.FromContext(ctx)
@@ -757,8 +762,8 @@ func (r *WorkbenchesReconciler) setStatusNamespaces(wb *componentsv1alpha1.Workb
 // fall back by platform: opendatahub (ODH/default) or redhat-ods-applications
 // (SelfManagedRhoai). Spec.WorkbenchNamespace is not used for operand deploy.
 func (r *WorkbenchesReconciler) resolveOperandNamespace(platformType string) string {
-	if r.ApplicationsNamespace != "" && len(validation.IsDNS1123Label(r.ApplicationsNamespace)) == 0 {
-		return r.ApplicationsNamespace
+	if ns := r.configuredApplicationsNamespace(); ns != "" {
+		return ns
 	}
 
 	return platform.DefaultApplicationsNamespace(platformType)

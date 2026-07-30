@@ -443,6 +443,8 @@ var _ = Describe("Workbenches Controller", func() {
 			DeferCleanup(func() {
 				cleanupWorkbenches(wb)
 				cleanupNamespace("legacy-invalid-apps-ns")
+				// fallbackNS is the shared suite applications namespace — do not delete it.
+				removeOwnedNamespaceLabel(fallbackNS)
 			})
 
 			_, err := reconcileWorkbenches(invalidReconciler, wb)
@@ -1077,6 +1079,31 @@ func cleanupNamespace(name string) {
 	}
 
 	ExpectWithOffset(1, k8sClient.Delete(ctx, ns)).To(Succeed())
+}
+
+func removeOwnedNamespaceLabel(name string) {
+	ns := &corev1.Namespace{}
+
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, ns)
+	if client.IgnoreNotFound(err) != nil {
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		return
+	}
+
+	if err != nil {
+		return
+	}
+
+	if ns.Labels == nil {
+		return
+	}
+
+	delete(ns.Labels, metadata.OwnedNamespaceLabel)
+	if len(ns.Labels) == 0 {
+		ns.Labels = nil
+	}
+
+	ExpectWithOffset(1, k8sClient.Update(ctx, ns)).To(Succeed())
 }
 
 func cleanupDeployments(namespace string) {
