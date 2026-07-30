@@ -14,9 +14,9 @@ This is a Kubernetes operator (built with Kubebuilder/controller-runtime) that m
 - **Committed manifests**: Operand manifests under `opt/manifests/` are fetched by `get_all_manifests.sh`, committed to the repo, and copied into the image at build time. Do not hand-edit them. The script has ODH and RHOAI source maps; `ODH_PLATFORM_TYPE` selects which (`OpenDataHub` default or `rhoai` for downstream).
 - **Server-side apply**: Manifest application uses SSA with field manager `workbenches-operator`.
 - **Platform awareness**: Platforms `OpenDataHub` and `SelfManagedRhoai` select different notebook overlays and default namespaces.
-- **Immutable fields**: `workbenchNamespace` is immutable after initial creation (CEL-enforced). It is legacy-only; operand deploy uses the resolved applications namespace.
+- **Immutable fields**: `workbenchNamespace` is immutable after initial creation (CEL-enforced). It names the legacy JupyterHub-era notebooks namespace (ensured on reconcile); operand deploy uses the resolved applications namespace.
 - **Platform version handshake**: Controller watches ConfigMap `odh-workbenches-config` (in the resolved applications namespace) and records the platform version in `status.releases` (see `internal/platformconfig/`).
-- **Operand namespace**: Notebook-controller manifests are applied into the resolved applications namespace (`APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise `opendatahub` for OpenDataHub / `redhat-ods-applications` for SelfManagedRhoai), not `spec.workbenchNamespace`.
+- **Operand namespace**: Notebook-controller manifests are applied into the resolved applications namespace (`APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise `opendatahub` for OpenDataHub / `redhat-ods-applications` for SelfManagedRhoai). The legacy `workbenchNamespace` (or platform default `rhods-notebooks` / `opendatahub`) is ensured separately for Notebook CR placement.
 - **Distribution alignment**: `status.distribution` reports the distribution context (`OpenDataHub`, `SelfManagedRHOAI`, or `Standalone`). Ready is gated on distribution alignment when a platform ConfigMap is present.
 - **Managed vs Removed**: `managementState: Removed` cleans up operator-managed resources; deletion uses finalizer `components.platform.opendatahub.io/workbenches-cleanup`.
 
@@ -105,7 +105,7 @@ There are no `test-upgrade`, `test-handler`, or `bundle` Makefile targets.
 
 Key spec fields:
 - `managementState`: `Managed` (default) or `Removed`
-- `workbenchNamespace`: legacy JupyterHub-era notebooks namespace (immutable); **ignored for operand deploy**
+- `workbenchNamespace`: legacy JupyterHub-era notebooks namespace (immutable); ensured on reconcile; **not** the operand deploy target
 - `platform`: `OpenDataHub` or `SelfManagedRhoai`
 - `gatewayDomain`, `mlflowEnabled`: projected by the orchestrator
 

@@ -112,7 +112,13 @@ var _ = Describe("Workbenches Controller", func() {
 
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
-			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(ns.OwnerReferences).To(BeEmpty(), "generated namespaces must not be controller-owned")
+
+			legacy := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(legacy.OwnerReferences).To(BeEmpty(), "legacy workbench namespaces must not be controller-owned")
 
 			updated := getWorkbenches(wb.Name)
 			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
@@ -421,6 +427,35 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(updated.Status.Distribution.Version).To(Equal("0.0.0"))
 		})
 
+		It("Should fall back to platform default when ApplicationsNamespace is invalid", func() {
+			fallbackNS := "opendatahub"
+			ensureNamespace(fallbackNS)
+
+			invalidReconciler := &controller.WorkbenchesReconciler{
+				Client:                k8sClient,
+				Scheme:                scheme.Scheme,
+				ManifestsBasePath:     manifestsDir,
+				ApplicationsNamespace: "bad/name",
+			}
+
+			wb := createWorkbenches("Managed", "legacy-invalid-apps-ns", "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace("legacy-invalid-apps-ns")
+			})
+
+			_, err := reconcileWorkbenches(invalidReconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.ApplicationsNamespace).To(Equal(fallbackNS))
+
+			ns := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fallbackNS}, ns)).To(Succeed())
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+		})
+
 		It("Should fall back to redhat-ods-applications for SelfManagedRhoai when ApplicationsNamespace is unset", func() {
 			fallbackNS := "redhat-ods-applications"
 			ensureNamespace(fallbackNS)
@@ -578,6 +613,7 @@ var _ = Describe("Workbenches Controller", func() {
 
 			DeferCleanup(func() {
 				cleanupWorkbenches(wb)
+				cleanupNamespace("rhods-notebooks")
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -589,16 +625,21 @@ var _ = Describe("Workbenches Controller", func() {
 
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
+
+			legacy := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "rhods-notebooks"}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
 		})
 
 		It("Should label a pre-existing applications namespace", func() {
 			ensureNamespace(applicationsNamespace)
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
+			ns.OwnerReferences = nil
 			if ns.Labels != nil {
-				delete(ns.Labels, "opendatahub.io/generated-namespace")
-				Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+				delete(ns.Labels, metadata.OwnedNamespaceLabel)
 			}
+			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 
 			wb := createWorkbenches("Managed", "legacy-ignored-ns", "OpenDataHub")
 
@@ -610,10 +651,11 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
-			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(ns.OwnerReferences).To(BeEmpty(), "pre-existing namespaces must not be claimed")
 		})
 
-		It("Should ignore legacy workbenchNamespace when deploying operands", func() {
+		It("Should create legacy workbenchNamespace without deploying operands there", func() {
 			legacyNS := "legacy-jupyterhub-ns"
 			wb := &componentsv1alpha1.Workbenches{
 				ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
@@ -641,8 +683,13 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(updated.Status.WorkbenchNamespace).To(Equal(legacyNS))
 
 			legacy := &corev1.Namespace{}
-			Expect(client.IgnoreNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy))).To(Succeed())
-			Expect(legacy.Name).To(BeEmpty(), "legacy workbenchNamespace must not be created for operand deploy")
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(legacy.OwnerReferences).To(BeEmpty(), "legacy workbench namespaces must not be controller-owned")
+
+			deploys := &appsv1.DeploymentList{}
+			Expect(k8sClient.List(ctx, deploys, client.InNamespace(legacyNS))).To(Succeed())
+			Expect(deploys.Items).To(BeEmpty(), "operands must not deploy into legacy workbenchNamespace")
 		})
 	})
 

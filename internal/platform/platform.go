@@ -29,10 +29,13 @@ const (
 	DefaultApplicationsNamespaceRHOAI = "redhat-ods-applications"
 )
 
-// LegacyWorkbenchNamespaceRHOAI is the historical JupyterHub-era notebooks
-// namespace default on RHOAI (spec.workbenchNamespace only; not used for
-// operand deploy).
-const LegacyWorkbenchNamespaceRHOAI = "rhods-notebooks"
+// Legacy workbench namespace defaults (JupyterHub-era notebook CR placement).
+// Operand deploy uses DefaultApplicationsNamespace*; these are ensured separately
+// when spec.workbenchNamespace is unset.
+const (
+	LegacyWorkbenchNamespaceODH   = DefaultApplicationsNamespaceODH
+	LegacyWorkbenchNamespaceRHOAI = "rhods-notebooks"
+)
 
 // IsValid reports whether platformType is a recognized platform value.
 func IsValid(platformType string) bool {
@@ -67,5 +70,17 @@ func DefaultApplicationsNamespace(platformType string) string {
 		return DefaultApplicationsNamespaceRHOAI
 	default:
 		return DefaultApplicationsNamespaceODH
+	}
+}
+
+// DefaultLegacyWorkbenchNamespace returns the legacy notebooks namespace when
+// spec.workbenchNamespace is unset: opendatahub for ODH (and unknown), rhods-notebooks
+// for SelfManagedRhoai.
+func DefaultLegacyWorkbenchNamespace(platformType string) string {
+	switch platformType {
+	case SelfManagedRhoai:
+		return LegacyWorkbenchNamespaceRHOAI
+	default:
+		return LegacyWorkbenchNamespaceODH
 	}
 }
