@@ -288,6 +288,137 @@ func TestSetComponentLabels(t *testing.T) {
 			t.Error("component label was not set")
 		}
 	})
+
+	t.Run("patches Deployment matchLabels and template labels", func(t *testing.T) {
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]any{"name": "notebook-controller"},
+				"spec": map[string]any{
+					"selector": map[string]any{
+						"matchLabels": map[string]any{
+							"app":                           "notebook-controller",
+							"app.kubernetes.io/part-of":     "odh-notebook-controller",
+							"component.opendatahub.io/name": "kf-notebook-controller",
+						},
+					},
+					"template": map[string]any{
+						"metadata": map[string]any{
+							"labels": map[string]any{
+								"app":                           "notebook-controller",
+								"app.kubernetes.io/part-of":     "odh-notebook-controller",
+								"component.opendatahub.io/name": "kf-notebook-controller",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		setComponentLabels(obj)
+
+		matchLabels, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
+		if matchLabels[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+			t.Errorf("matchLabels: expected %s=%s, got %s",
+				metadata.PartOfLabelKey, metadata.ComponentLabelValue, matchLabels[metadata.PartOfLabelKey])
+		}
+
+		if matchLabels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+			t.Errorf("matchLabels: expected %s=%s, got %s",
+				metadata.ComponentLabelKey, metadata.LabelTrue, matchLabels[metadata.ComponentLabelKey])
+		}
+
+		if matchLabels["app"] != "notebook-controller" {
+			t.Error("matchLabels: existing label 'app' was not preserved")
+		}
+
+		templateLabels, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "metadata", "labels")
+		if templateLabels[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+			t.Errorf("template labels: expected %s=%s, got %s",
+				metadata.PartOfLabelKey, metadata.ComponentLabelValue, templateLabels[metadata.PartOfLabelKey])
+		}
+
+		if templateLabels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+			t.Errorf("template labels: expected %s=%s, got %s",
+				metadata.ComponentLabelKey, metadata.LabelTrue, templateLabels[metadata.ComponentLabelKey])
+		}
+	})
+
+	t.Run("patches Service spec.selector", func(t *testing.T) {
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Service",
+				"metadata":   map[string]any{"name": "test-svc"},
+				"spec": map[string]any{
+					"selector": map[string]any{
+						"app":                       "notebook-controller",
+						"app.kubernetes.io/part-of": "odh-notebook-controller",
+					},
+				},
+			},
+		}
+
+		setComponentLabels(obj)
+
+		selector, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector")
+		if selector[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+			t.Errorf("Service spec.selector[%s] = %q, want %q",
+				metadata.PartOfLabelKey, selector[metadata.PartOfLabelKey], metadata.ComponentLabelValue)
+		}
+
+		if selector[metadata.ComponentLabelKey] != metadata.LabelTrue {
+			t.Errorf("Service spec.selector[%s] = %q, want %q",
+				metadata.ComponentLabelKey, selector[metadata.ComponentLabelKey], metadata.LabelTrue)
+		}
+
+		if selector["app"] != "notebook-controller" {
+			t.Error("Service spec.selector: existing label 'app' was not preserved")
+		}
+	})
+
+	t.Run("does not patch selector for non-Deployment non-Service kinds", func(t *testing.T) {
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "test-cm"},
+				"data": map[string]any{
+					"key": "value",
+				},
+			},
+		}
+
+		setComponentLabels(obj)
+
+		labels := obj.GetLabels()
+		if labels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+			t.Error("metadata.labels should still be patched")
+		}
+	})
+
+	t.Run("skips Service selector patching when no selector exists", func(t *testing.T) {
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Service",
+				"metadata":   map[string]any{"name": "no-selector-svc"},
+				"spec": map[string]any{
+					"ports": []any{
+						map[string]any{"port": int64(443)},
+					},
+				},
+			},
+		}
+
+		setComponentLabels(obj)
+
+		_, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector")
+		if found {
+			t.Error("Service without selector should not get a selector added")
+		}
+	})
 }
 
 func TestIsNamespaced(t *testing.T) {
@@ -916,6 +1047,114 @@ func TestRenderRealManifests(t *testing.T) {
 
 					t.Logf("rendered %d objects", len(objects))
 				})
+			}
+		})
+	}
+}
+
+// TestComponentLabelsConsistencyInRealManifests renders the real upstream manifests,
+// applies setComponentLabels, and verifies that component labels are consistent
+// across all selector-related fields (Deployment matchLabels, template labels,
+// Service selectors) so Services can select their pods.
+func TestComponentLabelsConsistencyInRealManifests(t *testing.T) {
+	repoRoot := filepath.Join("..", "..")
+	basePath := filepath.Join(repoRoot, "opt", "manifests")
+
+	if _, err := os.Stat(basePath); os.IsNotExist(err) {
+		t.Fatalf("opt/manifests not found — run 'make manifests-fetch' and commit the result")
+	}
+
+	params := map[string]string{
+		paramSectionTitle:  "Test",
+		paramMLflowEnabled: "false",
+		paramGatewayURL:    "",
+	}
+
+	for _, p := range []string{platform.OpenDataHub, platform.SelfManagedRhoai} {
+		t.Run(p, func(t *testing.T) {
+			groups := manifestGroupsForPlatform(p)
+
+			workDir := t.TempDir()
+			if err := copyDir(filepath.Join(basePath, "workbenches"), filepath.Join(workDir, "workbenches")); err != nil {
+				t.Fatalf("copyDir() failed: %v", err)
+			}
+
+			for _, group := range groups {
+				renderDir := filepath.Join(workDir, group)
+
+				objects, err := renderKustomize(renderDir, params)
+				if err != nil {
+					t.Fatalf("renderKustomize(%s) failed: %v", group, err)
+				}
+
+				for _, obj := range objects {
+					setComponentLabels(obj)
+
+					kind := obj.GetKind()
+					name := obj.GetName()
+
+					metaLabels := obj.GetLabels()
+					if metaLabels[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+						t.Errorf("%s/%s: metadata.labels[%s] = %q, want %q",
+							kind, name, metadata.PartOfLabelKey,
+							metaLabels[metadata.PartOfLabelKey], metadata.ComponentLabelValue)
+					}
+
+					if metaLabels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+						t.Errorf("%s/%s: metadata.labels[%s] = %q, want %q",
+							kind, name, metadata.ComponentLabelKey,
+							metaLabels[metadata.ComponentLabelKey], metadata.LabelTrue)
+					}
+
+					if kind == "Deployment" {
+						matchLabels, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
+						if found {
+							if matchLabels[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+								t.Errorf("%s/%s: spec.selector.matchLabels[%s] = %q, want %q",
+									kind, name, metadata.PartOfLabelKey,
+									matchLabels[metadata.PartOfLabelKey], metadata.ComponentLabelValue)
+							}
+
+							if matchLabels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+								t.Errorf("%s/%s: spec.selector.matchLabels[%s] = %q, want %q",
+									kind, name, metadata.ComponentLabelKey,
+									matchLabels[metadata.ComponentLabelKey], metadata.LabelTrue)
+							}
+						}
+
+						templateLabels, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "metadata", "labels")
+						if found {
+							if templateLabels[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+								t.Errorf("%s/%s: spec.template.metadata.labels[%s] = %q, want %q",
+									kind, name, metadata.PartOfLabelKey,
+									templateLabels[metadata.PartOfLabelKey], metadata.ComponentLabelValue)
+							}
+
+							if templateLabels[metadata.ComponentLabelKey] != metadata.LabelTrue {
+								t.Errorf("%s/%s: spec.template.metadata.labels[%s] = %q, want %q",
+									kind, name, metadata.ComponentLabelKey,
+									templateLabels[metadata.ComponentLabelKey], metadata.LabelTrue)
+							}
+						}
+					}
+
+					if kind == "Service" {
+						svcSelector, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector")
+						if found {
+							if svcSelector[metadata.PartOfLabelKey] != metadata.ComponentLabelValue {
+								t.Errorf("%s/%s: spec.selector[%s] = %q, want %q",
+									kind, name, metadata.PartOfLabelKey,
+									svcSelector[metadata.PartOfLabelKey], metadata.ComponentLabelValue)
+							}
+
+							if svcSelector[metadata.ComponentLabelKey] != metadata.LabelTrue {
+								t.Errorf("%s/%s: spec.selector[%s] = %q, want %q",
+									kind, name, metadata.ComponentLabelKey,
+									svcSelector[metadata.ComponentLabelKey], metadata.LabelTrue)
+							}
+						}
+					}
+				}
 			}
 		})
 	}
