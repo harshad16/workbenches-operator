@@ -44,7 +44,11 @@ import (
 	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 )
 
-const fieldOwner = "workbenches-operator"
+const (
+	fieldOwner     = "workbenches-operator"
+	kindDeployment = "Deployment"
+	kindService    = "Service"
+)
 
 // manifestGroupsForPlatform returns the kustomize root paths (relative to
 // ManifestsBasePath) for the given platform type. The OpenShift overlay is
@@ -342,6 +346,30 @@ func setComponentLabels(obj *unstructured.Unstructured) {
 	labels[metadata.PartOfLabelKey] = metadata.ComponentLabelValue
 
 	obj.SetLabels(labels)
+
+	switch obj.GetKind() {
+	case kindDeployment:
+		patchNestedLabels(obj, "spec", "selector", "matchLabels")
+		patchNestedLabels(obj, "spec", "template", "metadata", "labels")
+	case kindService:
+		patchNestedLabels(obj, "spec", "selector")
+	}
+}
+
+// patchNestedLabels sets the operator's component labels on a nested label map
+// (e.g. spec.selector.matchLabels, spec.template.metadata.labels, or
+// spec.selector for Services) so that selectors stay consistent with the
+// top-level metadata labels. It is a no-op when the nested map does not exist.
+func patchNestedLabels(obj *unstructured.Unstructured, fields ...string) {
+	nested, found, err := unstructured.NestedStringMap(obj.Object, fields...)
+	if err != nil || !found {
+		return
+	}
+
+	nested[metadata.ComponentLabelKey] = metadata.LabelTrue
+	nested[metadata.PartOfLabelKey] = metadata.ComponentLabelValue
+
+	_ = unstructured.SetNestedStringMap(obj.Object, nested, fields...)
 }
 
 var clusterScopedKinds = map[string]bool{
@@ -438,10 +466,10 @@ func findKustomizationFile(dir string) string {
 // Secrets were Owned and GC-eligible; ImageStreams were never Owned and were
 // skipped by onlyOwned GC, so they are intentionally omitted here.
 var cleanupGVKs = []schema.GroupVersionKind{
-	{Group: "apps", Version: "v1", Kind: "Deployment"},
+	{Group: "apps", Version: "v1", Kind: kindDeployment},
 	{Group: "", Version: "v1", Kind: "ConfigMap"},
 	{Group: "", Version: "v1", Kind: "Secret"},
-	{Group: "", Version: "v1", Kind: "Service"},
+	{Group: "", Version: "v1", Kind: kindService},
 	{Group: "", Version: "v1", Kind: "ServiceAccount"},
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role"},
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding"},

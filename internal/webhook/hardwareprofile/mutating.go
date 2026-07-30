@@ -28,12 +28,16 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,23 +48,31 @@ import (
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
 )
 
-const specField = "spec"
+const (
+	specField = "spec"
+
+	kueueQueueNameLabel = "kueue.x-k8s.io/queue-name"
+)
 
 var (
 	notebookContainersPath   = []string{specField, "template", specField, "containers"}
 	notebookNodeSelectorPath = []string{specField, "template", specField, "nodeSelector"}
 	notebookTolerationsPath  = []string{specField, "template", specField, "tolerations"}
+
+	errNoMatchingContainer = errors.New("no matching main container found")
 )
 
 //+kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=hardwareprofiles,verbs=get
-//+kubebuilder:webhook:path=/workbenches-hardware-profile,mutating=true,failurePolicy=fail,timeoutSeconds=5,groups=kubeflow.org,resources=notebooks,verbs=create;update,versions=v1,name=hardwareprofile-notebook-injector.opendatahub.io,sideEffects=None,admissionReviewVersions=v1
+//+kubebuilder:rbac:groups="",resources=events,verbs=create
+//+kubebuilder:webhook:path=/workbenches-hardware-profile,mutating=true,failurePolicy=fail,timeoutSeconds=5,groups=kubeflow.org,resources=notebooks,verbs=create;update,versions=v1,name=hardwareprofile-notebook-injector.opendatahub.io,sideEffects=NoneOnDryRun,admissionReviewVersions=v1
 
 // Injector implements a mutating admission webhook for hardware profile injection
 // into Notebook resources.
 type Injector struct {
-	Client  client.Reader
-	Decoder admission.Decoder
-	Name    string
+	Client      client.Reader
+	EventWriter client.Writer
+	Decoder     admission.Decoder
+	Name        string
 }
 
 var _ admission.Handler = &Injector{}
@@ -169,13 +181,26 @@ func (i *Injector) performHardwareProfileInjection(
 	}
 
 	if validateErr := i.validateContainerNames(obj); validateErr != nil {
-		warningMsg := fmt.Sprintf("Hardware profile '%s' was not applied: %s. "+
-			"All hardware profile settings (identifiers, scheduling, etc.) are skipped.",
-			profileName, validateErr.Error())
+		expectedName := obj.GetName()
+		isDryRun := req.DryRun != nil && *req.DryRun
 
-		log.Info("skipping all hardware profile application due to container name mismatch",
+		var warningMsg string
+		if isContainerNameMismatch(validateErr) {
+			warningMsg = fmt.Sprintf("Hardware profile '%s' was not applied: %s. "+
+				"To use this hardware profile, rename your container to '%s'. "+
+				"All hardware profile settings (identifiers, scheduling, etc.) are skipped.",
+				profileName, validateErr.Error(), expectedName)
+			i.maybeEmitContainerNameWarningEvent(ctx, isDryRun, obj, validateErr, profileName, expectedName)
+		} else {
+			warningMsg = fmt.Sprintf("Hardware profile '%s' was not applied due to validation error: %s. "+
+				"All hardware profile settings are skipped. Please check your workload structure.",
+				profileName, validateErr.Error())
+			i.maybeEmitValidationErrorEvent(ctx, isDryRun, obj, validateErr, profileName)
+		}
+
+		log.Info("skipping all hardware profile application due to validation failure",
 			"workload", obj.GetName(), "namespace", obj.GetNamespace(),
-			"hardwareProfile", profileName)
+			"hardwareProfile", profileName, "error", validateErr)
 
 		marshaledObj, marshalErr := json.Marshal(obj)
 		if marshalErr != nil {
@@ -275,8 +300,114 @@ func (i *Injector) validateContainerNames(obj *unstructured.Unstructured) error 
 		}
 	}
 
-	return fmt.Errorf("no matching main container found in Notebook '%s/%s': expected container name '%s'",
-		obj.GetNamespace(), obj.GetName(), expectedName)
+	return fmt.Errorf("%w in Notebook '%s/%s': expected container name '%s'",
+		errNoMatchingContainer, obj.GetNamespace(), obj.GetName(), expectedName)
+}
+
+func isContainerNameMismatch(err error) bool {
+	return errors.Is(err, errNoMatchingContainer)
+}
+
+// maybeEmitContainerNameWarningEvent creates a Warning event on the workload to indicate
+// that hardware profile settings were not applied due to container name mismatch.
+// Skipped during dry-run requests. Non-blocking — failures are logged but never fail admission.
+func (i *Injector) maybeEmitContainerNameWarningEvent(
+	ctx context.Context, isDryRun bool, obj *unstructured.Unstructured,
+	validationErr error, hwpName, expectedName string,
+) {
+	if isDryRun {
+		return
+	}
+
+	log := logf.FromContext(ctx)
+
+	if i.EventWriter == nil {
+		log.V(1).Info("no event writer configured, skipping event creation")
+
+		return
+	}
+
+	eventMessage := fmt.Sprintf("Hardware profile '%s' settings not applied to this workload: %s. "+
+		"Rename container to '%s' to enable hardware profile injection.",
+		hwpName, validationErr.Error(), expectedName)
+
+	now := metav1.NewTime(time.Now())
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: obj.GetName() + ".hwp-",
+			Namespace:    obj.GetNamespace(),
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:       obj.GetKind(),
+			Namespace:  obj.GetNamespace(),
+			Name:       obj.GetName(),
+			UID:        obj.GetUID(),
+			APIVersion: obj.GetAPIVersion(),
+		},
+		Reason:         "ContainerNameMismatch",
+		Message:        eventMessage,
+		Source:         corev1.EventSource{Component: "hardwareprofile-webhook"},
+		Type:           corev1.EventTypeWarning,
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+
+	if createErr := i.EventWriter.Create(ctx, event); createErr != nil {
+		log.V(1).Info("failed to create warning event for container name mismatch (non-blocking)",
+			"error", createErr, "workload", obj.GetName())
+	}
+}
+
+// maybeEmitValidationErrorEvent creates a Warning event on the workload to indicate
+// that hardware profile settings were not applied due to a structural validation error.
+// Skipped during dry-run requests. Non-blocking — failures are logged but never fail admission.
+func (i *Injector) maybeEmitValidationErrorEvent(
+	ctx context.Context, isDryRun bool, obj *unstructured.Unstructured,
+	validationErr error, hwpName string,
+) {
+	if isDryRun {
+		return
+	}
+
+	log := logf.FromContext(ctx)
+
+	if i.EventWriter == nil {
+		log.V(1).Info("no event writer configured, skipping event creation")
+
+		return
+	}
+
+	eventMessage := fmt.Sprintf("Hardware profile '%s' was not applied due to validation error: %v. "+
+		"Check your workload structure.",
+		hwpName, validationErr)
+
+	now := metav1.NewTime(time.Now())
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: obj.GetName() + ".hwp-",
+			Namespace:    obj.GetNamespace(),
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:       obj.GetKind(),
+			Namespace:  obj.GetNamespace(),
+			Name:       obj.GetName(),
+			UID:        obj.GetUID(),
+			APIVersion: obj.GetAPIVersion(),
+		},
+		Reason:         "ValidationError",
+		Message:        eventMessage,
+		Source:         corev1.EventSource{Component: "hardwareprofile-webhook"},
+		Type:           corev1.EventTypeWarning,
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+
+	if createErr := i.EventWriter.Create(ctx, event); createErr != nil {
+		log.V(1).Info("failed to create warning event for validation error (non-blocking)",
+			"error", createErr, "workload", obj.GetName())
+	}
 }
 
 func (i *Injector) handleHWPRemoval(
@@ -348,6 +479,13 @@ func (i *Injector) handleHWPRemoval(
 }
 
 func (i *Injector) removeHWPSettings(obj, hwp *unstructured.Unstructured) error {
+	// Remove Kueue label if the old HWP had Kueue scheduling.
+	// Errors from NestedString indicate a malformed field (non-string value) — safe to skip.
+	kueueQueueName, _, _ := unstructured.NestedString(hwp.Object, "spec", "scheduling", "kueue", "localQueueName")
+	if kueueQueueName != "" {
+		removeLabel(obj, kueueQueueNameLabel)
+	}
+
 	nodeSelector, nsFound, _ := unstructured.NestedStringMap(hwp.Object, "spec", "scheduling", "node", "nodeSelector")
 	if nsFound && len(nodeSelector) > 0 {
 		if err := removeHWPNodeSelector(obj, notebookNodeSelectorPath, nodeSelector); err != nil {
@@ -472,6 +610,7 @@ func (i *Injector) applyHardwareProfileToNotebook(
 		log.V(1).Info("clearing existing scheduling settings due to profile change",
 			"workload", notebook.GetName(), "hardwareProfile", hwp.GetName())
 
+		removeLabel(notebook, kueueQueueNameLabel)
 		unstructured.RemoveNestedField(notebook.Object, notebookNodeSelectorPath...)
 		unstructured.RemoveNestedField(notebook.Object, notebookTolerationsPath...)
 	}
@@ -481,6 +620,34 @@ func (i *Injector) applyHardwareProfileToNotebook(
 		if err := applyResourcesToNotebookContainer(ctx, identifiers, notebook, profileChanged); err != nil {
 			return nil, fmt.Errorf("failed to apply resource requirements: %w", err)
 		}
+	}
+
+	// Apply Kueue LocalQueue label if spec.scheduling.kueue.localQueueName is set.
+	// When Kueue scheduling is active, node scheduling (nodeSelector/tolerations) is skipped
+	// because Kueue handles pod placement via its queue configuration.
+	kueueQueueName, kueueFound, kueueErr := unstructured.NestedString(hwp.Object, "spec", "scheduling", "kueue", "localQueueName")
+	if kueueErr != nil {
+		return nil, fmt.Errorf("failed to read spec.scheduling.kueue.localQueueName: %w", kueueErr)
+	}
+
+	if kueueFound && kueueQueueName != "" {
+		if errs := validation.IsValidLabelValue(kueueQueueName); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid localQueueName %q in HardwareProfile '%s': %s",
+				kueueQueueName, hwp.GetName(), errs[0])
+		}
+
+		if !profileChanged {
+			existingValue := getLabel(notebook, kueueQueueNameLabel)
+			if existingValue != "" && existingValue != kueueQueueName {
+				warnings = append(warnings, fmt.Sprintf(
+					"label '%s' has value '%s' which will be overwritten by HardwareProfile '%s' which has value '%s'",
+					kueueQueueNameLabel, existingValue, hwp.GetName(), kueueQueueName))
+			}
+		}
+
+		setLabel(notebook, kueueQueueNameLabel, kueueQueueName)
+
+		return warnings, nil
 	}
 
 	nodeSelector, nsFound, _ := unstructured.NestedStringMap(hwp.Object, "spec", "scheduling", "node", "nodeSelector")
@@ -785,4 +952,33 @@ func removeAnnotation(obj *unstructured.Unstructured, key string) {
 
 	delete(annotations, key)
 	obj.SetAnnotations(annotations)
+}
+
+func getLabel(obj *unstructured.Unstructured, key string) string {
+	labels := obj.GetLabels()
+	if labels == nil {
+		return ""
+	}
+
+	return labels[key]
+}
+
+func setLabel(obj *unstructured.Unstructured, key, value string) {
+	labels := obj.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+
+	labels[key] = value
+	obj.SetLabels(labels)
+}
+
+func removeLabel(obj *unstructured.Unstructured, key string) {
+	labels := obj.GetLabels()
+	if labels == nil {
+		return
+	}
+
+	delete(labels, key)
+	obj.SetLabels(labels)
 }

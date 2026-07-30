@@ -24,8 +24,9 @@ import (
 // RegisterWebhooks registers the webhooks for hardware profile injection.
 func RegisterWebhooks(mgr ctrl.Manager) error {
 	return (&Injector{
-		Client:  mgr.GetAPIReader(),
-		Decoder: admission.NewDecoder(mgr.GetScheme()),
-		Name:    "hardwareprofile-injector",
+		Client:      mgr.GetAPIReader(),
+		EventWriter: mgr.GetClient(),
+		Decoder:     admission.NewDecoder(mgr.GetScheme()),
+		Name:        "hardwareprofile-injector",
 	}).SetupWithManager(mgr)
 }

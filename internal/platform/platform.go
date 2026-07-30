@@ -17,6 +17,12 @@ limitations under the License.
 // Package platform provides platform type constants and helpers.
 package platform
 
+import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
+)
+
 // Platform type constants matching the orchestrator's platform identity values.
 const (
 	OpenDataHub      = "OpenDataHub"
@@ -29,10 +35,13 @@ const (
 	DefaultApplicationsNamespaceRHOAI = "redhat-ods-applications"
 )
 
-// LegacyWorkbenchNamespaceRHOAI is the historical JupyterHub-era notebooks
-// namespace default on RHOAI (spec.workbenchNamespace only; not used for
-// operand deploy).
-const LegacyWorkbenchNamespaceRHOAI = "rhods-notebooks"
+// Legacy workbench namespace defaults (JupyterHub-era notebook CR placement).
+// Operand deploy uses DefaultApplicationsNamespace*; these are ensured separately
+// when spec.workbenchNamespace is unset.
+const (
+	LegacyWorkbenchNamespaceODH   = DefaultApplicationsNamespaceODH
+	LegacyWorkbenchNamespaceRHOAI = "rhods-notebooks"
+)
 
 // IsValid reports whether platformType is a recognized platform value.
 func IsValid(platformType string) bool {
@@ -58,6 +67,17 @@ func SectionTitle(platformType string) string {
 	return titles[OpenDataHub]
 }
 
+// ValidApplicationsNamespace returns name when it is a non-empty DNS-1123 label.
+// Invalid or empty values return "" so callers can fall back to platform defaults.
+func ValidApplicationsNamespace(name string) string {
+	name = strings.TrimSpace(name)
+	if name != "" && len(validation.IsDNS1123Label(name)) == 0 {
+		return name
+	}
+
+	return ""
+}
+
 // DefaultApplicationsNamespace returns the fallback applications namespace
 // when APPLICATIONS_NAMESPACE is unset: opendatahub for ODH (and unknown),
 // redhat-ods-applications for SelfManagedRhoai.
@@ -67,5 +87,17 @@ func DefaultApplicationsNamespace(platformType string) string {
 		return DefaultApplicationsNamespaceRHOAI
 	default:
 		return DefaultApplicationsNamespaceODH
+	}
+}
+
+// DefaultLegacyWorkbenchNamespace returns the legacy notebooks namespace when
+// spec.workbenchNamespace is unset: opendatahub for ODH (and unknown), rhods-notebooks
+// for SelfManagedRhoai.
+func DefaultLegacyWorkbenchNamespace(platformType string) string {
+	switch platformType {
+	case SelfManagedRhoai:
+		return LegacyWorkbenchNamespaceRHOAI
+	default:
+		return LegacyWorkbenchNamespaceODH
 	}
 }
