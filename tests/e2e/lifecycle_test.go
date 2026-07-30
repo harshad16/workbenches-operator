@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
 )
 
 func registerLifecycleTests() {
@@ -98,15 +99,14 @@ func registerComponentLifecycleTests() {
 			operandNamespace = defaultTestApplicationsNamespace
 
 			waitForCondition("ProvisioningSucceeded", metav1.ConditionTrue)
-		})
 
-		It("Should create the applications namespace with ownership label", func() {
-			Expect(operandNamespace).NotTo(BeEmpty(), "operandNamespace must be set by a prior test")
+			appsNS := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: defaultTestApplicationsNamespace}, appsNS)).To(Succeed())
+			Expect(appsNS.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
 
-			ns := &corev1.Namespace{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: operandNamespace}, ns)).To(Succeed())
-
-			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
+			legacyNS := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: defaultTestLegacyWorkbenchNamespace}, legacyNS)).To(Succeed())
+			Expect(legacyNS.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
 		})
 	})
 }
