@@ -64,6 +64,7 @@ const (
 	// ImageStreamsAvailable is informational only (matches ODH); it does not gate Ready.
 	conditionTypeImageStreamsAvailable  = "ImageStreamsAvailable"
 	conditionReasonImageStreamsNotReady = "ImageStreamsNotReady"
+	conditionReasonUnknown              = "Unknown"
 	conditionReasonAvailable            = "Available"
 	requeueDelay                        = 30 * time.Second
 
@@ -377,6 +378,8 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	wb.Status.Distribution = componentsv1alpha1.Distribution{}
 	wb.Status.ObservedGeneration = wb.Generation
 
+	sanitizeConditions(wb.Status.Conditions)
+
 	err := r.Status().Update(ctx, wb)
 
 	return ctrl.Result{}, err
@@ -406,6 +409,8 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 
 	if wb.Status.Phase == "" && wb.Status.ObservedGeneration == 0 {
 		wb.Status.Phase = statusutil.PhasePending
+
+		sanitizeConditions(wb.Status.Conditions)
 
 		if err := r.Status().Update(ctx, wb); err != nil {
 			l.Error(err, "failed to update Pending status")
@@ -522,6 +527,8 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 	phaseCtx.Degraded = meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeDegraded)
 	phaseCtx.ProvisioningSucceeded = meta.IsStatusConditionTrue(wb.Status.Conditions, conditionTypeProvisioningSucceeded)
 	wb.Status.Phase = statusutil.ComputePhase(phaseCtx)
+
+	sanitizeConditions(wb.Status.Conditions)
 
 	err = r.Status().Update(ctx, wb)
 	if err != nil {
@@ -832,11 +839,24 @@ func (r *WorkbenchesReconciler) setErrorStatus(
 	wb.Status.Phase = statusutil.ComputePhase(statusutil.PhaseContext{Failed: true})
 	wb.Status.ObservedGeneration = wb.Generation
 
+	sanitizeConditions(wb.Status.Conditions)
+
 	if err := r.Status().Update(ctx, wb); err != nil {
 		log.FromContext(ctx).Error(err, "failed to update error status")
 	}
 
 	return ctrl.Result{}, reconcileErr
+}
+
+// sanitizeConditions ensures every condition has a non-empty Reason.
+// Foreign conditions (set by other controllers or the platform orchestrator) may
+// violate the Kubernetes validation rule that reason must be >= 1 character.
+func sanitizeConditions(conditions []metav1.Condition) {
+	for i := range conditions {
+		if conditions[i].Reason == "" {
+			conditions[i].Reason = conditionReasonUnknown
+		}
+	}
 }
 
 // deploymentsAvailability reports whether all component deployments have the desired
