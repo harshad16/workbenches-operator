@@ -17,6 +17,12 @@ limitations under the License.
 // Package platform provides platform type constants and helpers.
 package platform
 
+import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
+)
+
 // Platform type constants matching the orchestrator's platform identity values.
 const (
 	OpenDataHub      = "OpenDataHub"
@@ -59,6 +65,17 @@ func SectionTitle(platformType string) string {
 	}
 
 	return titles[OpenDataHub]
+}
+
+// ValidApplicationsNamespace returns name when it is a non-empty DNS-1123 label.
+// Invalid or empty values return "" so callers can fall back to platform defaults.
+func ValidApplicationsNamespace(name string) string {
+	name = strings.TrimSpace(name)
+	if name != "" && len(validation.IsDNS1123Label(name)) == 0 {
+		return name
+	}
+
+	return ""
 }
 
 // DefaultApplicationsNamespace returns the fallback applications namespace

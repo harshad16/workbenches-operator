@@ -41,3 +41,18 @@ var _ = Describe("DefaultLegacyWorkbenchNamespace", func() {
 		Entry("empty defaults to ODH", "", platform.LegacyWorkbenchNamespaceODH),
 	)
 })
+
+var _ = Describe("ValidApplicationsNamespace", func() {
+	DescribeTable("accepts DNS-1123 labels only",
+		func(provided, want string) {
+			Expect(platform.ValidApplicationsNamespace(provided)).To(Equal(want))
+		},
+		Entry("empty", "", ""),
+		Entry("whitespace", "  ", ""),
+		Entry("invalid slash", "bad/name", ""),
+		Entry("invalid underscore", "Invalid_Namespace", ""),
+		Entry("valid ODH default", "opendatahub", "opendatahub"),
+		Entry("valid RHOAI default", "redhat-ods-applications", "redhat-ods-applications"),
+		Entry("trimmed valid", "  custom-apps  ", "custom-apps"),
+	)
+})
