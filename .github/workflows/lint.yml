@@ -188,3 +188,24 @@ jobs:
 
       - name: Verify kustomize and Helm produce the same resource kinds
         run: make chart-verify-inventory
+
+  go-mod-verify:
+    name: go mod verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: go mod download all
+
+      - name: Verify module checksums
+        run: go mod verify
