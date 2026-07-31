@@ -40,6 +40,21 @@ func TestPlatformConfigWatchNamespaces(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid configured namespace falls back to both platform defaults", func(t *testing.T) {
+		t.Parallel()
+
+		r := &WorkbenchesReconciler{ApplicationsNamespace: "bad/name"}
+		got := r.platformConfigWatchNamespaces()
+		if len(got) != 2 {
+			t.Fatalf("platformConfigWatchNamespaces() len = %d, want 2", len(got))
+		}
+		if got[0] != platform.DefaultApplicationsNamespaceODH ||
+			got[1] != platform.DefaultApplicationsNamespaceRHOAI {
+			t.Fatalf("platformConfigWatchNamespaces() = %#v, want [%s %s]",
+				got, platform.DefaultApplicationsNamespaceODH, platform.DefaultApplicationsNamespaceRHOAI)
+		}
+	})
+
 	t.Run("unset falls back to both platform defaults", func(t *testing.T) {
 		t.Parallel()
 

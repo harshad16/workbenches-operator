@@ -17,6 +17,7 @@ limitations under the License.
 package controller_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
@@ -40,7 +42,10 @@ import (
 	statusutil "github.com/opendatahub-io/workbenches-operator/internal/status"
 )
 
-const testNotebookControllerDeployment = "odh-notebook-controller"
+const (
+	testNotebookControllerDeployment = "odh-notebook-controller"
+	conditionReasonUnknown           = "Unknown"
+)
 
 var _ = Describe("Workbenches Controller", func() {
 	var (
@@ -112,7 +117,13 @@ var _ = Describe("Workbenches Controller", func() {
 
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
-			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(ns.OwnerReferences).To(BeEmpty(), "generated namespaces must not be controller-owned")
+
+			legacy := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(legacy.OwnerReferences).To(BeEmpty(), "legacy workbench namespaces must not be controller-owned")
 
 			updated := getWorkbenches(wb.Name)
 			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
@@ -421,6 +432,37 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(updated.Status.Distribution.Version).To(Equal("0.0.0"))
 		})
 
+		It("Should fall back to platform default when ApplicationsNamespace is invalid", func() {
+			fallbackNS := "opendatahub"
+			ensureNamespace(fallbackNS)
+
+			invalidReconciler := &controller.WorkbenchesReconciler{
+				Client:                k8sClient,
+				Scheme:                scheme.Scheme,
+				ManifestsBasePath:     manifestsDir,
+				ApplicationsNamespace: "bad/name",
+			}
+
+			wb := createWorkbenches("Managed", "legacy-invalid-apps-ns", "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace("legacy-invalid-apps-ns")
+				// fallbackNS is the shared suite applications namespace — do not delete it.
+				removeOwnedNamespaceLabel(fallbackNS)
+			})
+
+			_, err := reconcileWorkbenches(invalidReconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Status.ApplicationsNamespace).To(Equal(fallbackNS))
+
+			ns := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fallbackNS}, ns)).To(Succeed())
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+		})
+
 		It("Should fall back to redhat-ods-applications for SelfManagedRhoai when ApplicationsNamespace is unset", func() {
 			fallbackNS := "redhat-ods-applications"
 			ensureNamespace(fallbackNS)
@@ -578,6 +620,7 @@ var _ = Describe("Workbenches Controller", func() {
 
 			DeferCleanup(func() {
 				cleanupWorkbenches(wb)
+				cleanupNamespace("rhods-notebooks")
 			})
 
 			_, err := reconcileWorkbenches(reconciler, wb)
@@ -589,16 +632,21 @@ var _ = Describe("Workbenches Controller", func() {
 
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
+
+			legacy := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "rhods-notebooks"}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
 		})
 
 		It("Should label a pre-existing applications namespace", func() {
 			ensureNamespace(applicationsNamespace)
 			ns := &corev1.Namespace{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
+			ns.OwnerReferences = nil
 			if ns.Labels != nil {
-				delete(ns.Labels, "opendatahub.io/generated-namespace")
-				Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+				delete(ns.Labels, metadata.OwnedNamespaceLabel)
 			}
+			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 
 			wb := createWorkbenches("Managed", "legacy-ignored-ns", "OpenDataHub")
 
@@ -610,10 +658,11 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: applicationsNamespace}, ns)).To(Succeed())
-			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
+			Expect(ns.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(ns.OwnerReferences).To(BeEmpty(), "pre-existing namespaces must not be claimed")
 		})
 
-		It("Should ignore legacy workbenchNamespace when deploying operands", func() {
+		It("Should create legacy workbenchNamespace without deploying operands there", func() {
 			legacyNS := "legacy-jupyterhub-ns"
 			wb := &componentsv1alpha1.Workbenches{
 				ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
@@ -641,8 +690,13 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(updated.Status.WorkbenchNamespace).To(Equal(legacyNS))
 
 			legacy := &corev1.Namespace{}
-			Expect(client.IgnoreNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy))).To(Succeed())
-			Expect(legacy.Name).To(BeEmpty(), "legacy workbenchNamespace must not be created for operand deploy")
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: legacyNS}, legacy)).To(Succeed())
+			Expect(legacy.Labels).To(HaveKeyWithValue(metadata.OwnedNamespaceLabel, metadata.LabelTrue))
+			Expect(legacy.OwnerReferences).To(BeEmpty(), "legacy workbench namespaces must not be controller-owned")
+
+			deploys := &appsv1.DeploymentList{}
+			Expect(k8sClient.List(ctx, deploys, client.InNamespace(legacyNS))).To(Succeed())
+			Expect(deploys.Items).To(BeEmpty(), "operands must not deploy into legacy workbenchNamespace")
 		})
 	})
 
@@ -848,6 +902,67 @@ var _ = Describe("Workbenches Controller", func() {
 		})
 	})
 
+	Context("When conditions have empty reasons", func() {
+		It("Should sanitize empty reasons before status update", func() {
+			nsName := "test-ns-empty-reason"
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconcileWorkbenches(reconciler, wb)
+			Expect(err).NotTo(HaveOccurred())
+
+			// We cannot write a condition with empty Reason through the
+			// validated status API (CRD enforces minLength: 1). Instead,
+			// wrap the client so that every Get of the Workbenches CR
+			// injects a foreign condition with an empty Reason, simulating
+			// what a pre-existing or foreign-controller condition looks
+			// like when the reconciler reads the object.
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+			Expect(err).NotTo(HaveOccurred())
+
+			wrappedClient := interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if getErr := c.Get(ctx, key, obj, opts...); getErr != nil {
+						return getErr
+					}
+					if wbObj, ok := obj.(*componentsv1alpha1.Workbenches); ok {
+						meta.SetStatusCondition(&wbObj.Status.Conditions, metav1.Condition{
+							Type:    "ForeignCondition",
+							Status:  metav1.ConditionFalse,
+							Reason:  "",
+							Message: "set by another controller with empty reason",
+						})
+					}
+					return nil
+				},
+			})
+
+			interceptedReconciler := &controller.WorkbenchesReconciler{
+				Client:                wrappedClient,
+				Scheme:                scheme.Scheme,
+				ManifestsBasePath:     manifestsDir,
+				ApplicationsNamespace: applicationsNamespace,
+			}
+
+			// Reconcile with the intercepted client — the sanitizer must
+			// fix the empty Reason before the Status().Update() call.
+			_, err = interceptedReconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Read back via the real client (no interception) and verify
+			// the foreign condition was persisted with a sanitized Reason.
+			final := getWorkbenches(wb.Name)
+			foreignCond := meta.FindStatusCondition(final.Status.Conditions, "ForeignCondition")
+			Expect(foreignCond).NotTo(BeNil())
+			Expect(foreignCond.Reason).To(Equal(conditionReasonUnknown),
+				"empty Reason should have been sanitized to 'Unknown'")
+		})
+	})
+
 	Context("When transitioning between states", func() {
 		It("Should transition from Managed to Removed", func() {
 			nsName := "test-ns-transition"
@@ -1030,6 +1145,31 @@ func cleanupNamespace(name string) {
 	}
 
 	ExpectWithOffset(1, k8sClient.Delete(ctx, ns)).To(Succeed())
+}
+
+func removeOwnedNamespaceLabel(name string) {
+	ns := &corev1.Namespace{}
+
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, ns)
+	if client.IgnoreNotFound(err) != nil {
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		return
+	}
+
+	if err != nil {
+		return
+	}
+
+	if ns.Labels == nil {
+		return
+	}
+
+	delete(ns.Labels, metadata.OwnedNamespaceLabel)
+	if len(ns.Labels) == 0 {
+		ns.Labels = nil
+	}
+
+	ExpectWithOffset(1, k8sClient.Update(ctx, ns)).To(Succeed())
 }
 
 func cleanupDeployments(namespace string) {

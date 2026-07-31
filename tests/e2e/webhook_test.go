@@ -277,4 +277,388 @@ func registerHardwareProfileTests() {
 				"webhook should set the hardware-profile-namespace annotation")
 		})
 	})
+
+	registerKueueTests()
+	registerEventEmissionTests()
+	registerProfileSwitchTests()
+	registerProfileRemovalTests()
+}
+
+func registerKueueTests() {
+	Context("Kueue LocalQueue label injection", Ordered, func() {
+		const kueueHWPName = "e2e-kueue-hwp"
+		const kueueNotebookName = "e2e-kueue-nb"
+		const queueName = "e2e-test-queue"
+
+		BeforeAll(func() {
+			ensureCreated(newHardwareProfile(kueueHWPName, map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"displayName":  "CPU",
+						"identifier":   "cpu",
+						"minCount":     int64(1),
+						"defaultCount": int64(2),
+					},
+				},
+				"scheduling": map[string]any{
+					"type": "Queue",
+					"kueue": map[string]any{
+						"localQueueName": queueName,
+					},
+				},
+			}))
+		})
+
+		AfterAll(func() {
+			nb := newNotebook(kueueNotebookName, nil)
+			_ = k8sClient.Delete(ctx, nb)
+
+			hwp := &unstructured.Unstructured{}
+			hwp.SetGroupVersionKind(hwpGVK())
+			hwp.SetName(kueueHWPName)
+			hwp.SetNamespace(webhookTestNamespace)
+			_ = k8sClient.Delete(ctx, hwp)
+		})
+
+		It("Should set kueue.x-k8s.io/queue-name label from HardwareProfile", func() {
+			nb := newNotebook(kueueNotebookName, map[string]string{
+				"opendatahub.io/hardware-profile-name": kueueHWPName,
+			})
+
+			Expect(k8sClient.Create(ctx, nb)).To(Succeed())
+
+			created := &unstructured.Unstructured{}
+			created.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      kueueNotebookName,
+				Namespace: webhookTestNamespace,
+			}, created)).To(Succeed())
+
+			labels := created.GetLabels()
+			Expect(labels).To(HaveKeyWithValue("kueue.x-k8s.io/queue-name", queueName),
+				"webhook should set the Kueue queue-name label")
+		})
+
+		It("Should NOT apply nodeSelector or tolerations when Kueue is configured", func() {
+			created := &unstructured.Unstructured{}
+			created.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      kueueNotebookName,
+				Namespace: webhookTestNamespace,
+			}, created)).To(Succeed())
+
+			_, nsFound, _ := unstructured.NestedStringMap(created.Object,
+				"spec", "template", "spec", "nodeSelector")
+			Expect(nsFound).To(BeFalse(),
+				"nodeSelector should NOT be applied when Kueue scheduling is active")
+
+			_, tolFound, _ := unstructured.NestedSlice(created.Object,
+				"spec", "template", "spec", "tolerations")
+			Expect(tolFound).To(BeFalse(),
+				"tolerations should NOT be applied when Kueue scheduling is active")
+		})
+	})
+}
+
+func registerEventEmissionTests() {
+	Context("Event emission on container name mismatch", Ordered, func() {
+		const eventHWPName = "e2e-event-hwp"
+		const eventNotebookName = "e2e-event-nb"
+
+		BeforeAll(func() {
+			ensureCreated(newHardwareProfile(eventHWPName, map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"displayName":  "CPU",
+						"identifier":   "cpu",
+						"minCount":     int64(1),
+						"defaultCount": int64(2),
+					},
+				},
+			}))
+		})
+
+		AfterAll(func() {
+			nb := &unstructured.Unstructured{}
+			nb.SetGroupVersionKind(notebookGVK())
+			nb.SetName(eventNotebookName)
+			nb.SetNamespace(webhookTestNamespace)
+			_ = k8sClient.Delete(ctx, nb)
+
+			hwp := &unstructured.Unstructured{}
+			hwp.SetGroupVersionKind(hwpGVK())
+			hwp.SetName(eventHWPName)
+			hwp.SetNamespace(webhookTestNamespace)
+			_ = k8sClient.Delete(ctx, hwp)
+		})
+
+		It("Should emit a ContainerNameMismatch Warning event when container name does not match", func() {
+			nb := &unstructured.Unstructured{}
+			nb.SetGroupVersionKind(notebookGVK())
+			nb.SetName(eventNotebookName)
+			nb.SetNamespace(webhookTestNamespace)
+			nb.SetAnnotations(map[string]string{
+				"opendatahub.io/hardware-profile-name": eventHWPName,
+			})
+
+			// Multi-container with NO container matching the notebook name
+			Expect(unstructured.SetNestedField(nb.Object, map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"name":  "wrong-name",
+							"image": "jupyter/minimal-notebook:latest",
+						},
+						map[string]any{
+							"name":  "sidecar",
+							"image": "busybox:latest",
+						},
+					},
+				},
+			}, "spec", "template")).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, nb)).To(Succeed(),
+				"Notebook should still be admitted despite container name mismatch")
+
+			// Verify a ContainerNameMismatch Warning event was emitted
+			Eventually(func() bool {
+				events := &corev1.EventList{}
+				if err := k8sClient.List(ctx, events,
+					client.InNamespace(webhookTestNamespace)); err != nil {
+					return false
+				}
+
+				for i := range events.Items {
+					if events.Items[i].Reason == "ContainerNameMismatch" &&
+						events.Items[i].Type == corev1.EventTypeWarning &&
+						events.Items[i].InvolvedObject.Name == eventNotebookName {
+						return true
+					}
+				}
+
+				return false
+			}, webhookTimeout, webhookInterval).Should(BeTrue(),
+				"Expected a ContainerNameMismatch Warning event on the Notebook")
+		})
+	})
+}
+
+func registerProfileSwitchTests() {
+	Context("Hardware profile switch via UPDATE", Ordered, func() {
+		const switchHWP1 = "e2e-switch-hwp1"
+		const switchHWP2 = "e2e-switch-hwp2"
+		const switchNotebook = "e2e-switch-nb"
+
+		BeforeAll(func() {
+			ensureCreated(newHardwareProfile(switchHWP1, map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"displayName":  "CPU",
+						"identifier":   "cpu",
+						"minCount":     int64(1),
+						"defaultCount": int64(2),
+					},
+					map[string]any{
+						"displayName":  "Memory",
+						"identifier":   "memory",
+						"minCount":     "1Gi",
+						"defaultCount": "4Gi",
+					},
+				},
+				"scheduling": map[string]any{
+					"type": "Node",
+					"node": map[string]any{
+						"nodeSelector": map[string]any{
+							"profile": "hwp1",
+						},
+					},
+				},
+			}))
+
+			ensureCreated(newHardwareProfile(switchHWP2, map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"displayName":  "CPU",
+						"identifier":   "cpu",
+						"minCount":     int64(4),
+						"defaultCount": int64(8),
+					},
+					map[string]any{
+						"displayName":  "Memory",
+						"identifier":   "memory",
+						"minCount":     "8Gi",
+						"defaultCount": "16Gi",
+					},
+				},
+				"scheduling": map[string]any{
+					"type": "Node",
+					"node": map[string]any{
+						"nodeSelector": map[string]any{
+							"profile": "hwp2",
+						},
+					},
+				},
+			}))
+		})
+
+		AfterAll(func() {
+			nb := newNotebook(switchNotebook, nil)
+			_ = k8sClient.Delete(ctx, nb)
+
+			for _, name := range []string{switchHWP1, switchHWP2} {
+				hwp := &unstructured.Unstructured{}
+				hwp.SetGroupVersionKind(hwpGVK())
+				hwp.SetName(name)
+				hwp.SetNamespace(webhookTestNamespace)
+				_ = k8sClient.Delete(ctx, hwp)
+			}
+		})
+
+		It("Should apply first profile on creation", func() {
+			nb := newNotebook(switchNotebook, map[string]string{
+				"opendatahub.io/hardware-profile-name": switchHWP1,
+			})
+
+			Expect(k8sClient.Create(ctx, nb)).To(Succeed())
+
+			created := &unstructured.Unstructured{}
+			created.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      switchNotebook,
+				Namespace: webhookTestNamespace,
+			}, created)).To(Succeed())
+
+			nodeSelector, found, _ := unstructured.NestedStringMap(created.Object,
+				"spec", "template", "spec", "nodeSelector")
+			Expect(found).To(BeTrue())
+			Expect(nodeSelector).To(HaveKeyWithValue("profile", "hwp1"))
+		})
+
+		It("Should replace scheduling when switching to second profile", func() {
+			existing := &unstructured.Unstructured{}
+			existing.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      switchNotebook,
+				Namespace: webhookTestNamespace,
+			}, existing)).To(Succeed())
+
+			annotations := existing.GetAnnotations()
+			annotations["opendatahub.io/hardware-profile-name"] = switchHWP2
+			existing.SetAnnotations(annotations)
+
+			Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+
+			updated := &unstructured.Unstructured{}
+			updated.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      switchNotebook,
+				Namespace: webhookTestNamespace,
+			}, updated)).To(Succeed())
+
+			nodeSelector, found, _ := unstructured.NestedStringMap(updated.Object,
+				"spec", "template", "spec", "nodeSelector")
+			Expect(found).To(BeTrue())
+			Expect(nodeSelector).To(HaveKeyWithValue("profile", "hwp2"),
+				"nodeSelector should reflect the new profile, not the old one")
+		})
+	})
+}
+
+func registerProfileRemovalTests() {
+	Context("Hardware profile removal cleanup", Ordered, func() {
+		const removalHWP = "e2e-removal-hwp"
+		const removalNotebook = "e2e-removal-nb"
+
+		BeforeAll(func() {
+			ensureCreated(newHardwareProfile(removalHWP, map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"displayName":  "CPU",
+						"identifier":   "cpu",
+						"minCount":     int64(1),
+						"defaultCount": int64(2),
+					},
+				},
+				"scheduling": map[string]any{
+					"type": "Node",
+					"node": map[string]any{
+						"nodeSelector": map[string]any{
+							"removable-key": "removable-value",
+						},
+						"tolerations": []any{
+							map[string]any{
+								"key":      "removable-tol",
+								"operator": "Exists",
+								"effect":   "NoSchedule",
+							},
+						},
+					},
+				},
+			}))
+		})
+
+		AfterAll(func() {
+			nb := newNotebook(removalNotebook, nil)
+			_ = k8sClient.Delete(ctx, nb)
+
+			hwp := &unstructured.Unstructured{}
+			hwp.SetGroupVersionKind(hwpGVK())
+			hwp.SetName(removalHWP)
+			hwp.SetNamespace(webhookTestNamespace)
+			_ = k8sClient.Delete(ctx, hwp)
+		})
+
+		It("Should apply scheduling on creation", func() {
+			nb := newNotebook(removalNotebook, map[string]string{
+				"opendatahub.io/hardware-profile-name": removalHWP,
+			})
+
+			Expect(k8sClient.Create(ctx, nb)).To(Succeed())
+
+			created := &unstructured.Unstructured{}
+			created.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      removalNotebook,
+				Namespace: webhookTestNamespace,
+			}, created)).To(Succeed())
+
+			nodeSelector, found, _ := unstructured.NestedStringMap(created.Object,
+				"spec", "template", "spec", "nodeSelector")
+			Expect(found).To(BeTrue())
+			Expect(nodeSelector).To(HaveKeyWithValue("removable-key", "removable-value"))
+		})
+
+		It("Should remove scheduling settings when HWP annotation is removed", func() {
+			existing := &unstructured.Unstructured{}
+			existing.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      removalNotebook,
+				Namespace: webhookTestNamespace,
+			}, existing)).To(Succeed())
+
+			// Remove the HWP name annotation (keep namespace so removal logic triggers)
+			annotations := existing.GetAnnotations()
+			delete(annotations, "opendatahub.io/hardware-profile-name")
+			existing.SetAnnotations(annotations)
+
+			Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+
+			updated := &unstructured.Unstructured{}
+			updated.SetGroupVersionKind(notebookGVK())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      removalNotebook,
+				Namespace: webhookTestNamespace,
+			}, updated)).To(Succeed())
+
+			_, nsFound, _ := unstructured.NestedStringMap(updated.Object,
+				"spec", "template", "spec", "nodeSelector")
+			Expect(nsFound).To(BeFalse(),
+				"nodeSelector should be removed after HWP annotation removal")
+
+			_, tolFound, _ := unstructured.NestedSlice(updated.Object,
+				"spec", "template", "spec", "tolerations")
+			Expect(tolFound).To(BeFalse(),
+				"tolerations should be removed after HWP annotation removal")
+		})
+	})
 }

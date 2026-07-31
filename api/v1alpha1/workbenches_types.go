@@ -44,11 +44,12 @@ type WorkbenchesSpec struct {
 	ManagementState string `json:"managementState,omitempty"`
 
 	// workbenchNamespace is a legacy field retained for JupyterHub-era notebook
-	// namespaces (for example rhods-notebooks on RHOAI). The module operator does
-	// not use this field when deploying notebook-controller operands; those always
-	// target the resolved APPLICATIONS_NAMESPACE (falls back by platform to
-	// opendatahub or redhat-ods-applications when unset/invalid). Immutable after
-	// initial creation.
+	// namespaces (for example rhods-notebooks on RHOAI). Notebook-controller
+	// operands deploy into the resolved APPLICATIONS_NAMESPACE (falls back by
+	// platform to opendatahub or redhat-ods-applications when unset/invalid);
+	// this field names the separate legacy notebooks namespace the operator ensures
+	// for Notebook CR placement. When unset, defaults to opendatahub (ODH) or
+	// rhods-notebooks (SelfManagedRhoai). Immutable after initial creation.
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workbenchNamespace is immutable"
