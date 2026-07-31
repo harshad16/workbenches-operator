@@ -10,7 +10,7 @@ When `spec.managementState` is `Managed`, the operator:
 
 1. Validates the `Workbenches` spec.
 2. Ensures the resolved applications namespace exists (creating it if needed) for operands and platform ConfigMap — `APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise the platform default (`opendatahub` / `redhat-ods-applications`).
-3. Renders upstream Kustomize manifests with operator-specific parameters (`section-title`, `mlflow-enabled`, `gateway-url`).
+3. Renders upstream Kustomize manifests: overlays `RELATED_IMAGE_*` environment variables onto `params.env`/`params-latest.env` image keys (`internal/controller/imageparams.go`), then merges CR-derived parameters (`section-title`, `mlflow-enabled`, `gateway-url`).
 4. Applies resources to the cluster using Server-Side Apply (SSA).
 5. Populates `status.releases` from upstream `component_metadata.yaml` (when present).
 6. Updates `status.distribution` to reflect the reconciled distribution context.
@@ -21,7 +21,7 @@ When `spec.managementState` is `Removed`, the operator cleans up managed resourc
 
 A **finalizer** (`components.platform.opendatahub.io/workbenches-cleanup`) is added to every `Workbenches` CR. On `Removed` or CR deletion, the operator deletes operand resources identified by component labels before clearing the finalizer.
 
-The controller watches labelled operand **Deployments** for availability changes (ready/available replica counts), so status updates promptly when deployments become ready or regress without waiting for a spec change.
+The controller sets **OwnerReferences** on operand resources (except Namespace, CRD, ImageStream) and uses `Owns()` watches for drift reconciliation. It also watches labelled operand **Deployments** for availability changes (ready/available replica counts), so status updates promptly when deployments become ready or regress without waiting for a spec change. Component labels (`app.opendatahub.io/workbenches=true`, `app.kubernetes.io/part-of=workbenches`) are applied consistently to all objects' metadata, Deployment selectors/pod templates, and Service selectors.
 
 Upstream manifests are **committed** under `opt/manifests/` for hermetic container builds (Konflux/airgapped environments cannot fetch from GitHub at build time). The image copies that tree into `/opt/manifests`. At runtime the operator copies manifests to a temporary directory before rendering so the baked-in tree stays immutable.
 
@@ -102,17 +102,25 @@ When `--enable-webhooks=true` (default), the operator serves two mutating admiss
 | Webhook | Path | Name | Purpose |
 |---------|------|------|---------|
 | Connection | `/workbenches-connection-notebook` | `connection-notebook.opendatahub.io` | Injects connection secrets from the `opendatahub.io/connections` annotation |
-| Hardware profile | `/workbenches-hardware-profile` | `hardwareprofile-notebook-injector.opendatahub.io` | Applies `HardwareProfile` settings (resources, nodeSelector, tolerations) from `opendatahub.io/hardware-profile-name` / `opendatahub.io/hardware-profile-namespace` annotations |
+| Hardware profile | `/workbenches-hardware-profile` | `hardwareprofile-notebook-injector.opendatahub.io` | Applies `HardwareProfile` settings (resources, nodeSelector, tolerations) from `opendatahub.io/hardware-profile-name` / `opendatahub.io/hardware-profile-namespace` annotations; injects Kueue LocalQueue label |
 
-The hardware profile webhook reads `HardwareProfile` CRs (`infrastructure.opendatahub.io/v1`) as unstructured objects to avoid a dependency on the platform operator API.
+The hardware profile webhook reads `HardwareProfile` CRs (`infrastructure.opendatahub.io/v1`) as unstructured objects to avoid a dependency on the platform operator API. It also reads `spec.scheduling.kueue.localQueueName` and sets the `kueue.x-k8s.io/queue-name` label on the Notebook — when Kueue is active, nodeSelector/tolerations are skipped (Kueue handles placement). The webhook emits Kubernetes Warning Events (`ContainerNameMismatch`, `ValidationError`) on validation failures.
 
-Webhook TLS is configured via the Helm chart or Kustomize overlays:
+#### Webhook TLS
 
-| Provider | Use case |
-|----------|----------|
-| `openshift` (default) | OpenShift service-CA annotations (`config/default/`) |
-| `certmanager` | cert-manager `Certificate` + `ClusterIssuer` (`config/certmanager/`) |
-| `""` (empty) | Platform provisions certificates out-of-band |
+At startup, the operator **auto-detects** the available TLS provider by probing cluster API groups (`internal/webhook/tls/`):
+
+| Provider | Detection | Behaviour |
+|----------|-----------|-----------|
+| **OpenShift** (highest priority) | `route.openshift.io` or `security.openshift.io` API group present | Annotates Service with `service.beta.openshift.io/serving-cert-secret-name` and MutatingWebhookConfiguration with `inject-cabundle` |
+| **cert-manager** | `cert-manager.io` API group present | Creates `ClusterIssuer` + `Certificate`, annotates MutatingWebhookConfiguration with `cert-manager.io/inject-ca-from` |
+| **None** | Neither detected | Webhooks are disabled; MutatingWebhookConfiguration is deleted |
+
+A periodic retry (30s) handles resources (Service, MutatingWebhookConfiguration) that appear after startup.
+
+Additionally, on OpenShift the operator integrates with the cluster-wide **TLS security profile** (`internal/tlsconfig/`): it reads the APIServer TLS profile at startup and applies its cipher/TLS-version settings to the metrics and webhook servers. A watcher triggers graceful shutdown on profile changes. On non-OpenShift clusters, Mozilla Intermediate defaults are used.
+
+The Helm chart value `webhooks.tlsProvider` (`openshift`, `certmanager`, or `""`) controls which Kustomize overlay is used for static TLS resources at chart templating time.
 
 ## Custom Resource
 
@@ -134,7 +142,7 @@ Notebook-controller operands and the platform ConfigMap (`odh-workbenches-config
 
 ### Status
 
-The controller publishes conditions including `Ready`, `ProvisioningSucceeded`, `DeploymentsAvailable`, `Degraded`, and `ReleaseMetadataAvailable`:
+The controller publishes conditions including `Ready`, `ProvisioningSucceeded`, `DeploymentsAvailable`, `Degraded`, and `ReleaseMetadataAvailable`. Before every status update, conditions with empty `Reason` fields are sanitized to `"Unknown"` to prevent API validation errors from foreign conditions:
 
 | Field | Description |
 |-------|-------------|
@@ -352,14 +360,19 @@ Workflows run on pushes and PRs to `main`, `stable`, and `v1.x` (except manifest
 |----------|---------|
 | [`test.yml`](.github/workflows/test.yml) | Unit tests and manifest rendering validation |
 | [`build.yml`](.github/workflows/build.yml) | `make build` |
-| [`lint.yml`](.github/workflows/lint.yml) | golangci-lint, go vet, kube-linter, Helm lint, chart sync checks |
+| [`lint.yml`](.github/workflows/lint.yml) | golangci-lint, go vet, kube-linter, Helm lint, chart sync checks, verify-manifests, verify-generate |
 | [`e2e.yml`](.github/workflows/e2e.yml) | End-to-end tests on Kind cluster |
 | [`go-directive-updater.yaml`](.github/workflows/go-directive-updater.yaml) | Weekly Go patch version bumps |
 | [`manifest-sync.yaml`](.github/workflows/manifest-sync.yaml) | Daily upstream manifest sync PRs |
+| [`sync-branches.yaml`](.github/workflows/sync-branches.yaml) | Manual/workflow_call branch sync (`main→stable`, `stable→v1.x`); excludes `opt/manifests` |
+| [`tls-lint.yml`](.github/workflows/tls-lint.yml) | TLS configuration lint with SARIF upload |
+| [`semgrep-tls.yml`](.github/workflows/semgrep-tls.yml) | Semgrep TLS compliance rules on PRs |
 
 Coverage is uploaded to Codecov ([`codecov.yml`](codecov.yml)).
 
 [Dependabot](`.github/dependabot.yml`) is configured for weekly GitHub Actions version bumps and Go module security-only updates.
+
+Security scanning: [gitleaks](`.gitleaks.toml`) for secret detection and [Semgrep](`semgrep.yaml`) for TLS compliance rules.
 
 ### Konflux / Tekton
 
@@ -388,19 +401,23 @@ Pipelines in [`.tekton/`](.tekton/) build and publish the operator image via Kon
 │   ├── samples/               # Sample Workbenches CR
 │   └── webhook/               # MutatingWebhookConfiguration and service
 ├── internal/
-│   ├── controller/            # Reconciler, manifest rendering, deployment watches
+│   ├── controller/            # Reconciler, manifest rendering (manifests.go, imageparams.go, imagestreams.go)
 │   ├── gvk/                   # GroupVersionKind helpers
 │   ├── metadata/              # Label and annotation constants
 │   ├── platform/              # Platform type helpers
 │   ├── platformconfig/        # Platform ConfigMap + version handshake
 │   ├── releases/              # component_metadata.yaml loader
 │   ├── status/                # ModuleStatus phase computation
-│   └── webhook/               # Notebook mutating webhooks (connection, hardware profile)
+│   ├── tlsconfig/             # Cluster TLS security profile integration (OpenShift APIServer)
+│   └── webhook/               # Notebook mutating webhooks (connection, hardware profile + Kueue)
+│       └── tls/               # Runtime TLS provider auto-detection + cert provisioning
 ├── opt/
 │   ├── README.md              # Manifest contributor guidance
 │   └── manifests/             # Committed upstream manifests (hermetic builds)
 ├── hack/                      # Chart sync/verify scripts
 ├── .github/dependabot.yml     # Dependabot config (GHA + Go security)
+├── .gitleaks.toml             # Secret scanning configuration (gitleaks)
+├── semgrep.yaml               # Semgrep TLS compliance rules
 ├── get_all_manifests.sh       # Upstream manifest fetch script
 ├── tests/e2e/                 # End-to-end Ginkgo tests (Kind in CI)
 ├── DEPENDENCIES.md            # Go, dependency, and tool upgrade guide
@@ -449,10 +466,6 @@ Review [`OWNERS`](OWNERS) for approvers and reviewers. Open pull requests agains
 - When refreshing upstream manifests, commit `opt/manifests/` together with any `get_all_manifests.sh` source changes.
 - See [`DEPENDENCIES.md`](DEPENDENCIES.md) for Go version, dependency, and upstream manifest upgrade procedures.
 - Agent-oriented project conventions live in [`AGENTS.md`](AGENTS.md).
-
-### Known limitations
-
-- Operand resources do not yet set `OwnerReferences` on the `Workbenches` CR; generic `Owns()` watches are deferred ([#30](https://github.com/opendatahub-io/workbenches-operator/issues/30)). Deployment availability is tracked via an explicit watch on labelled operand Deployments instead.
 
 ## License
 
