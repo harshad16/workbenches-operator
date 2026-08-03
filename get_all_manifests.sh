@@ -38,7 +38,7 @@ declare -A ODH_COMPONENT_MANIFESTS=(
 declare -A RHOAI_COMPONENT_MANIFESTS=(
     ["workbenches/kf-notebook-controller"]="red-hat-data-services:kubeflow:rhoai-3.5@1998656679e96a2d4244dddce885ce3af5885cd2:components/notebook-controller/config"
     ["workbenches/odh-notebook-controller"]="red-hat-data-services:kubeflow:rhoai-3.5@1998656679e96a2d4244dddce885ce3af5885cd2:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="red-hat-data-services:notebooks:rhoai-3.5@305fc9347bd74741ebf4d691cf6dd5e99e644b8e:manifests"
+    ["workbenches/notebooks"]="red-hat-data-services:notebooks:rhoai-3.5@3aed4019d03135f004fe7ebe5fb7fe733b316470:manifests"
 )
 
 # Select manifests based on platform type (default: OpenDataHub / upstream).
