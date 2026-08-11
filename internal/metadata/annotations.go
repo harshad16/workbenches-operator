@@ -26,4 +26,12 @@ const (
 	AcceleratorNameAnnotation             = "opendatahub.io/accelerator-name"
 	AcceleratorProfileNamespaceAnnotation = "opendatahub.io/accelerator-profile-namespace"
 	LastSizeSelectionAnnotation           = "notebooks.opendatahub.io/last-size-selection"
+
+	// ManagedAnnotation controls whether the operator fully owns a Deployment.
+	// When set to "true" on a live Deployment, container resources and replicas
+	// from the rendered manifest are force-applied (user customizations are
+	// reverted). When absent or not "true", live resources/replicas are merged
+	// onto the rendered manifest before SSA — matching the former in-tree
+	// workbenches behavior via opendatahub-operator's MergeDeployments.
+	ManagedAnnotation = "opendatahub.io/managed"
 )
