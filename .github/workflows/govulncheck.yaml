@@ -1,0 +1,63 @@
+---
+name: Go Vulnerability Check
+
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          check-latest: true
+          go-version-file: go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Run govulncheck
+        id: vulncheck
+        run: |
+          set -o pipefail
+          # Generate JSON report (ignore exit code)
+          govulncheck -json ./... > govulncheck-report.json || true
+          # Generate text report - exit code propagates via pipefail
+          govulncheck ./... | tee govulncheck-report.txt
+
+      - name: Generate report summary
+        if: always()
+        run: |
+          echo "## Vulnerability Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [[ -f govulncheck-report.txt ]]; then
+            cat govulncheck-report.txt >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No text report was generated." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload vulnerability report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: govulncheck-report
+          path: |
+            govulncheck-report.json
+            govulncheck-report.txt
+          retention-days: 30
