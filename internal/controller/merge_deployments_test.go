@@ -103,13 +103,13 @@ func TestMergeDeploymentsOverride(t *testing.T) {
 	src := unstructured.Unstructured{Object: source}
 	trg := unstructured.Unstructured{Object: target}
 
-	if err := mergeDeployments(&src, &trg); err != nil {
-		t.Fatalf("mergeDeployments: %v", err)
+	if mergeErr := mergeDeployments(&src, &trg); mergeErr != nil {
+		t.Fatalf("mergeDeployments: %v", mergeErr)
 	}
 
-	replicas, found, err := unstructured.NestedInt64(trg.Object, "spec", "replicas")
-	if err != nil || !found {
-		t.Fatalf("replicas found=%v err=%v", found, err)
+	replicas, found, nestErr := unstructured.NestedInt64(trg.Object, "spec", "replicas")
+	if nestErr != nil || !found {
+		t.Fatalf("replicas found=%v err=%v", found, nestErr)
 	}
 
 	if replicas != 1 {
@@ -179,26 +179,81 @@ func TestMergeDeploymentsRemove(t *testing.T) {
 	src := unstructured.Unstructured{Object: source}
 	trg := unstructured.Unstructured{Object: target}
 
-	if err := mergeDeployments(&src, &trg); err != nil {
-		t.Fatalf("mergeDeployments: %v", err)
+	if mergeErr := mergeDeployments(&src, &trg); mergeErr != nil {
+		t.Fatalf("mergeDeployments: %v", mergeErr)
 	}
 
-	_, found, err := unstructured.NestedFieldNoCopy(trg.Object, "spec", "replicas")
-	if err != nil {
-		t.Fatalf("replicas lookup: %v", err)
+	_, found, nestErr := unstructured.NestedFieldNoCopy(trg.Object, "spec", "replicas")
+	if nestErr != nil {
+		t.Fatalf("replicas lookup: %v", nestErr)
 	}
 
 	if found {
 		t.Error("expected replicas to be removed when absent on live Deployment")
 	}
 
-	containers, _, err := unstructured.NestedSlice(trg.Object, "spec", "template", "spec", "containers")
-	if err != nil {
-		t.Fatalf("containers: %v", err)
+	containers, _, sliceErr := unstructured.NestedSlice(trg.Object, "spec", "template", "spec", "containers")
+	if sliceErr != nil {
+		t.Fatalf("containers: %v", sliceErr)
 	}
 
 	c0, _ := containers[0].(map[string]any)
 	if _, hasResources := c0["resources"]; hasResources {
 		t.Error("expected resources to be removed when absent on live container")
+	}
+}
+
+func TestMergeDeploymentsMalformedContainersPath(t *testing.T) {
+	t.Parallel()
+
+	source := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": "not-a-slice",
+				},
+			},
+		},
+	}}
+	target := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"replicas": int64(1),
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{"name": "manager"},
+					},
+				},
+			},
+		},
+	}}
+
+	if err := mergeDeployments(source, target); err == nil {
+		t.Fatal("expected error for malformed source containers path")
+	}
+
+	sourceOK := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{"name": "manager"},
+					},
+				},
+			},
+		},
+	}}
+	targetBad := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": map[string]any{"oops": true},
+				},
+			},
+		},
+	}}
+
+	if err := mergeDeployments(sourceOK, targetBad); err == nil {
+		t.Fatal("expected error for malformed target containers path")
 	}
 }

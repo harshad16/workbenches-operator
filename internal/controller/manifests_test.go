@@ -630,10 +630,10 @@ func TestApplyObjectsPreservesDeploymentCustomizations(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
+		name            string
 		liveAnnotations map[string]string
-		wantCPU        string
-		wantReplicas   int64
+		wantCPU         string
+		wantReplicas    int64
 	}{
 		{
 			name:         "preserves live resources and replicas when unmanaged",

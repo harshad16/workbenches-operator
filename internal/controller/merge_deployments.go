@@ -18,8 +18,14 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+var (
+	deploymentContainersPath = []string{"spec", "template", "spec", "containers"}
+	deploymentReplicasPath   = []string{"spec", "replicas"}
 )
 
 // mergeDeployments copies user-customizable fields from a live Deployment (source)
@@ -32,103 +38,131 @@ import (
 // This restores the pre-module-operator in-tree workbenches behavior, where
 // deploy.NewAction applied MergeDeployments unless opendatahub.io/managed=true.
 func mergeDeployments(source, target *unstructured.Unstructured) error {
-	containersPath := []string{"spec", "template", "spec", "containers"}
-	replicasPath := []string{"spec", "replicas"}
-
-	sc, ok, err := unstructured.NestedFieldNoCopy(source.Object, containersPath...)
-	if err != nil && ok {
+	if err := mergeDeploymentContainerResources(source, target); err != nil {
 		return err
 	}
 
-	tc, ok, err := unstructured.NestedFieldNoCopy(target.Object, containersPath...)
-	if err != nil && ok {
-		return err
-	}
+	return mergeDeploymentReplicas(source, target)
+}
 
-	resources := make(map[string]any)
-
-	var sourceContainers []any
-	if sc != nil {
-		sourceContainers, ok = sc.([]any)
-		if !ok {
-			return errors.New("source containers field is not a slice")
-		}
-	}
-
-	var targetContainers []any
-	if tc != nil {
-		targetContainers, ok = tc.([]any)
-		if !ok {
-			return errors.New("target containers field is not a slice")
-		}
-	}
-
-	for i := range sourceContainers {
-		m, ok := sourceContainers[i].(map[string]any)
-		if !ok {
-			return errors.New("source container entry is not a map")
-		}
-
-		name, ok := m["name"]
-		if !ok {
-			continue
-		}
-
-		r, ok := m["resources"]
-		if !ok {
-			r = make(map[string]any)
-		}
-
-		nameStr, ok := name.(string)
-		if !ok {
-			continue
-		}
-
-		resources[nameStr] = r
-	}
-
-	for i := range targetContainers {
-		m, ok := targetContainers[i].(map[string]any)
-		if !ok {
-			return errors.New("target container entry is not a map")
-		}
-
-		name, ok := m["name"]
-		if !ok {
-			continue
-		}
-
-		nameStr, ok := name.(string)
-		if !ok {
-			continue
-		}
-
-		nr, ok := resources[nameStr]
-		if !ok {
-			continue
-		}
-
-		nrMap, ok := nr.(map[string]any)
-		if !ok {
-			return errors.New("source container resources field is not a map")
-		}
-
-		if len(nrMap) == 0 {
-			delete(m, "resources")
-		} else {
-			m["resources"] = nr
-		}
-	}
-
-	sourceReplica, ok, err := unstructured.NestedFieldNoCopy(source.Object, replicasPath...)
+func mergeDeploymentContainerResources(source, target *unstructured.Unstructured) error {
+	sourceContainers, err := nestedContainerSlice(source, "source")
 	if err != nil {
 		return err
 	}
 
-	if !ok {
-		unstructured.RemoveNestedField(target.Object, replicasPath...)
-	} else if err := unstructured.SetNestedField(target.Object, sourceReplica, replicasPath...); err != nil {
+	targetContainers, err := nestedContainerSlice(target, "target")
+	if err != nil {
 		return err
+	}
+
+	resourcesByName, err := containerResourcesByName(sourceContainers)
+	if err != nil {
+		return err
+	}
+
+	return applyContainerResources(targetContainers, resourcesByName)
+}
+
+func nestedContainerSlice(obj *unstructured.Unstructured, side string) ([]any, error) {
+	raw, _, err := unstructured.NestedFieldNoCopy(obj.Object, deploymentContainersPath...)
+	if err != nil {
+		return nil, fmt.Errorf("%s containers path: %w", side, err)
+	}
+
+	if raw == nil {
+		return nil, nil
+	}
+
+	containers, isSlice := raw.([]any)
+	if !isSlice {
+		return nil, fmt.Errorf("%s containers field is not a slice", side)
+	}
+
+	return containers, nil
+}
+
+func containerResourcesByName(containers []any) (map[string]any, error) {
+	resourcesByName := make(map[string]any, len(containers))
+
+	for i := range containers {
+		container, isMap := containers[i].(map[string]any)
+		if !isMap {
+			return nil, errors.New("source container entry is not a map")
+		}
+
+		name, hasName := container["name"]
+		if !hasName {
+			continue
+		}
+
+		nameStr, isString := name.(string)
+		if !isString {
+			continue
+		}
+
+		resources, hasResources := container["resources"]
+		if !hasResources {
+			resources = make(map[string]any)
+		}
+
+		resourcesByName[nameStr] = resources
+	}
+
+	return resourcesByName, nil
+}
+
+func applyContainerResources(containers []any, resourcesByName map[string]any) error {
+	for i := range containers {
+		container, isMap := containers[i].(map[string]any)
+		if !isMap {
+			return errors.New("target container entry is not a map")
+		}
+
+		name, hasName := container["name"]
+		if !hasName {
+			continue
+		}
+
+		nameStr, isString := name.(string)
+		if !isString {
+			continue
+		}
+
+		resources, found := resourcesByName[nameStr]
+		if !found {
+			continue
+		}
+
+		resourcesMap, isResourcesMap := resources.(map[string]any)
+		if !isResourcesMap {
+			return errors.New("source container resources field is not a map")
+		}
+
+		if len(resourcesMap) == 0 {
+			delete(container, "resources")
+		} else {
+			container["resources"] = resources
+		}
+	}
+
+	return nil
+}
+
+func mergeDeploymentReplicas(source, target *unstructured.Unstructured) error {
+	sourceReplica, found, err := unstructured.NestedFieldNoCopy(source.Object, deploymentReplicasPath...)
+	if err != nil {
+		return fmt.Errorf("source replicas path: %w", err)
+	}
+
+	if !found {
+		unstructured.RemoveNestedField(target.Object, deploymentReplicasPath...)
+
+		return nil
+	}
+
+	if err := unstructured.SetNestedField(target.Object, sourceReplica, deploymentReplicasPath...); err != nil {
+		return fmt.Errorf("set target replicas: %w", err)
 	}
 
 	return nil
