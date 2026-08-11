@@ -18,6 +18,9 @@ This is a Kubernetes operator (built with Kubebuilder/controller-runtime) that m
 - **Platform version handshake**: Controller watches ConfigMap `odh-workbenches-config` (in the resolved applications namespace) and records the platform version in `status.releases` (see `internal/platformconfig/`).
 - **Operand namespace**: Notebook-controller manifests are applied into the resolved applications namespace (`APPLICATIONS_NAMESPACE` when set and DNS-1123 valid; otherwise `opendatahub` for OpenDataHub / `redhat-ods-applications` for SelfManagedRhoai). The legacy `workbenchNamespace` (or platform default `rhods-notebooks` / `opendatahub`) is ensured separately for Notebook CR placement.
 - **Distribution alignment**: `status.distribution` reports the distribution context (`OpenDataHub`, `SelfManagedRHOAI`, or `Standalone`). Ready is gated on distribution alignment when a platform ConfigMap is present.
+- **OwnerReferences and watches**: Operand resources receive `OwnerReferences` via `SetControllerReference` in `applyObjects()` (skip list: Namespace, CRD, ImageStream). The controller uses `Owns()` watches on ConfigMap, Secret, Service, ServiceAccount, Role, RoleBinding, ClusterRole, ClusterRoleBinding, MutatingWebhookConfiguration, ValidatingWebhookConfiguration, and Deployment (with `deploymentAvailabilityChangedPredicate`).
+- **Component labels**: SSA applies `app.opendatahub.io/workbenches=true` and `app.kubernetes.io/part-of=workbenches` on every object's metadata, and additionally patches `spec.selector.matchLabels`/`spec.template.metadata.labels` on Deployments and `spec.selector` on Services (`setComponentLabels`/`patchNestedLabels` in `manifests.go`).
+- **Status condition sanitization**: Before every status update, `sanitizeConditions()` replaces empty `Reason` fields with `"Unknown"` to avoid API validation errors from foreign conditions.
 - **Managed vs Removed**: `managementState: Removed` cleans up operator-managed resources; deletion uses finalizer `components.platform.opendatahub.io/workbenches-cleanup`.
 
 ## Repository Layout
@@ -25,8 +28,10 @@ This is a Kubernetes operator (built with Kubebuilder/controller-runtime) that m
 ```text
 cmd/main.go                     Entrypoint — manager, controller, optional webhooks
 api/v1alpha1/                   Workbenches CRD Go types
-internal/controller/            Reconciler + krusty/SSA rendering (manifests.go)
-internal/webhook/               Mutating webhooks (notebook connections, hardware profile)
+internal/controller/            Reconciler + krusty/SSA rendering (manifests.go, imageparams.go, imagestreams.go)
+internal/webhook/               Mutating webhooks (notebook connections, hardware profile + Kueue)
+internal/webhook/tls/           Runtime TLS provider auto-detection + cert provisioning
+internal/tlsconfig/             Cluster TLS security profile integration (OpenShift APIServer)
 internal/metadata/              Label/annotation constants
 internal/platform/              Platform constants and defaults (namespace, section title)
 internal/platformconfig/        odh-workbenches-config ConfigMap + version handshake
@@ -36,12 +41,12 @@ internal/gvk/                   Notebook, HardwareProfile, ImageStream, Namespac
 config/                         Kustomize (base, default/OpenShift, certmanager, crd, rbac, manager, operator, webhook, samples)
 charts/operator/                Helm chart (CRD/RBAC synced from generated config/)
 opt/manifests/                  Upstream operand manifests (get_all_manifests.sh; do not hand-edit)
-bundle/                         Sparse OLM artifacts (CRD); no make bundle target
-catalog/                        Catalog operator.yaml
 ci/                             Go directive bump helper script
 hack/                           Boilerplate + Helm chart sync/verify scripts
-.github/workflows/              CI (test, build, lint, manifest-sync, go-directive-updater)
+.github/workflows/              CI (test, build, lint, e2e, manifest-sync, sync-branches, TLS lint, Semgrep)
 .github/dependabot.yml          Dependabot: weekly GHA bumps + Go security updates
+semgrep.yaml                    Semgrep TLS compliance rules
+.gitleaks.toml                  Secret scanning configuration (gitleaks)
 .tekton/                        Konflux build PipelineRuns
 DEPENDENCIES.md                 Go / dependency / manifest upgrade guide
 get_all_manifests.sh            Manifest fetch script
@@ -125,18 +130,28 @@ Registered in `internal/webhook/webhook.go` via `RegisterAllWebhooks`:
    - Reads `opendatahub.io/connections`, validates secrets, injects `envFrom`
 2. **Hardware profile** (`internal/webhook/hardwareprofile/`) — path `/workbenches-hardware-profile`
    - Reads `opendatahub.io/hardware-profile-name`, applies resources/tolerations/nodeSelector
+   - **Kueue integration**: reads `spec.scheduling.kueue.localQueueName` from HardwareProfile and sets `kueue.x-k8s.io/queue-name` label on the Notebook. When Kueue is active, nodeSelector/tolerations are skipped (Kueue handles placement). Label is cleared on profile removal or change.
+   - Emits Kubernetes Warning Events (`ContainerNameMismatch`, `ValidationError`) on validation failures via `EventWriter`.
 
 `--enable-webhooks` defaults to `true` in `cmd/main.go`. The kustomize manager Deployment does not override it. Helm can toggle via `webhooks.enabled`.
+
+### TLS
+
+- **Webhook serving certs** (`internal/webhook/tls/`): at startup, `Detect()` auto-discovers the TLS provider by probing API groups — preference order: **OpenShift** (service-CA) → **cert-manager** → **None** (webhooks disabled). The `Ensure()` routine configures the appropriate Service annotations, CA-bundle injection on the MutatingWebhookConfiguration, and for cert-manager creates a `ClusterIssuer` + `Certificate`. A periodic retry (30s) handles resources that appear after startup.
+- **Cluster TLS profile** (`internal/tlsconfig/`): on OpenShift, reads the APIServer TLS security profile and applies its cipher/TLS-version settings to the metrics server and webhook server. A watcher triggers graceful shutdown on profile changes. On non-OpenShift, Mozilla Intermediate defaults are used.
 
 ## CI
 
 GitHub Actions in `.github/workflows/`:
 - `test.yml` — unit tests + Codecov; separate job for `TestRenderRealManifests`
 - `build.yml` — binary build
-- `lint.yml` — golangci-lint, go vet, kube-linter, helm-lint, chart sync/inventory verify
+- `lint.yml` — golangci-lint, go vet, kube-linter, helm-lint, chart sync/inventory verify, **verify-manifests** and **verify-generate** (ensure generated code is committed)
 - `e2e.yml` — end-to-end tests on Kind cluster (PRs touching code/Dockerfile)
 - `manifest-sync.yaml` — daily refresh of `opt/manifests/` (opens PR)
 - `go-directive-updater.yaml` — weekly `go` directive patch bump in `go.mod`
+- `sync-branches.yaml` — manual/workflow_call sync between branches (`main→stable`, `stable→v1.x`); excludes `opt/manifests`
+- `tls-lint.yml` — TLS configuration lint (`tls-config-lint`) with SARIF upload
+- `semgrep-tls.yml` — Semgrep TLS compliance rules on PRs
 
 Dependabot (`.github/dependabot.yml`): weekly GitHub Actions version bumps + Go module security-only updates.
 
@@ -149,10 +164,6 @@ Konflux builds: `.tekton/` PipelineRuns for push and pull request.
 - When refreshing upstream manifests, commit `opt/manifests/` together with any `get_all_manifests.sh` source changes.
 - See [DEPENDENCIES.md](DEPENDENCIES.md) for Go version, dependency, and upstream manifest upgrade procedures.
 - Review `OWNERS` for approvers and reviewers. Open pull requests against `main`.
-
-### Known limitations
-
-- Operand resources do not yet set `OwnerReferences` on the `Workbenches` CR; generic `Owns()` watches are deferred ([#30](https://github.com/opendatahub-io/workbenches-operator/issues/30)). Deployment availability is tracked via an explicit watch on labelled operand Deployments instead.
 
 ## Common Pitfalls
 

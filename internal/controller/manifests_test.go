@@ -614,6 +614,141 @@ func TestApplyObjectsSetsOwnerReferences(t *testing.T) {
 	}
 }
 
+func TestApplyObjectsPreservesDeploymentCustomizations(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	owner := &componentsv1alpha1.Workbenches{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: componentsv1alpha1.WorkbenchesInstanceName,
+			UID:  "owner-uid-456",
+		},
+	}
+
+	tests := []struct {
+		name            string
+		liveAnnotations map[string]string
+		wantCPU         string
+		wantReplicas    int64
+	}{
+		{
+			name:         "preserves live resources and replicas when unmanaged",
+			wantCPU:      "1001m",
+			wantReplicas: 2,
+		},
+		{
+			name: "applies manifest defaults when managed=true",
+			liveAnnotations: map[string]string{
+				metadata.ManagedAnnotation: "true",
+			},
+			wantCPU:      "500m",
+			wantReplicas: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			live := deploymentUnstructured("notebook-controller-deployment", "opendatahub", "1001m", 2)
+			if tt.liveAnnotations != nil {
+				live.SetAnnotations(tt.liveAnnotations)
+			}
+
+			desired := deploymentUnstructured("notebook-controller-deployment", "opendatahub", "500m", 1)
+
+			var patched *unstructured.Unstructured
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(live).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
+						u, ok := obj.(*unstructured.Unstructured)
+						if !ok {
+							t.Fatalf("expected unstructured, got %T", obj)
+						}
+						patched = u.DeepCopy()
+
+						return nil
+					},
+				}).
+				Build()
+
+			reconciler := &WorkbenchesReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			if err := reconciler.applyObjects(context.Background(), owner, []*unstructured.Unstructured{desired}); err != nil {
+				t.Fatalf("applyObjects() error = %v", err)
+			}
+
+			if patched == nil {
+				t.Fatal("expected Deployment to be patched")
+			}
+
+			replicas, found, err := unstructured.NestedInt64(patched.Object, "spec", "replicas")
+			if err != nil || !found {
+				t.Fatalf("replicas found=%v err=%v", found, err)
+			}
+
+			if replicas != tt.wantReplicas {
+				t.Errorf("replicas = %d, want %d", replicas, tt.wantReplicas)
+			}
+
+			containers, _, err := unstructured.NestedSlice(patched.Object, "spec", "template", "spec", "containers")
+			if err != nil || len(containers) == 0 {
+				t.Fatalf("containers: len=%d err=%v", len(containers), err)
+			}
+
+			c0, _ := containers[0].(map[string]any)
+			resources, _ := c0["resources"].(map[string]any)
+			limits, _ := resources["limits"].(map[string]any)
+			if limits["cpu"] != tt.wantCPU {
+				t.Errorf("limits.cpu = %v, want %s", limits["cpu"], tt.wantCPU)
+			}
+		})
+	}
+}
+
+func deploymentUnstructured(name, namespace, cpuLimit string, replicas int64) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]any{
+			"replicas": replicas,
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"name": "manager",
+							"resources": map[string]any{
+								"limits": map[string]any{
+									"cpu": cpuLimit,
+								},
+								"requests": map[string]any{
+									"cpu": cpuLimit,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}}
+
+	return obj
+}
+
 func TestRenderKustomize(t *testing.T) {
 	dir := t.TempDir()
 
