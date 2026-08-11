@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -288,6 +289,10 @@ func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[str
 // Owner references are set with SetControllerReference (matching opendatahub-operator) so
 // Owns() watches fire on drift and Kubernetes GC can cascade-delete owned children when the
 // Workbenches CR is deleted. Namespaces, CRDs, and ImageStreams are intentionally excluded.
+//
+// For Deployments, live container resources and replicas are merged onto the rendered
+// manifest before SSA unless the live object has opendatahub.io/managed=true (parity with
+// the former in-tree workbenches deploy.MergeDeployments path).
 func (r *WorkbenchesReconciler) applyObjects(
 	ctx context.Context,
 	owner *componentsv1alpha1.Workbenches,
@@ -307,6 +312,11 @@ func (r *WorkbenchesReconciler) applyObjects(
 				return fmt.Errorf("failed to set owner reference on %s %s/%s: %w",
 					obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 			}
+		}
+
+		if err := r.preserveDeploymentCustomizations(ctx, obj); err != nil {
+			return fmt.Errorf("failed to preserve Deployment customizations for %s/%s: %w",
+				obj.GetNamespace(), obj.GetName(), err)
 		}
 
 		obj.SetManagedFields(nil)
@@ -332,6 +342,54 @@ func (r *WorkbenchesReconciler) applyObjects(
 			"name", obj.GetName(),
 			"namespace", obj.GetNamespace())
 	}
+
+	return nil
+}
+
+// preserveDeploymentCustomizations merges user-set container resources and replicas from
+// the live Deployment onto the rendered object before SSA, matching opendatahub-operator's
+// deploy.Action.apply Deployment branch.
+//
+// Behavior:
+//   - non-Deployment: no-op
+//   - Deployment does not exist yet: no-op (create from manifest)
+//   - live has opendatahub.io/managed=true: no-op (SSA ForceOwnership reverts to manifest)
+//   - otherwise: mergeDeployments(live → rendered)
+func (r *WorkbenchesReconciler) preserveDeploymentCustomizations(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+) error {
+	if obj.GetKind() != kindDeployment {
+		return nil
+	}
+
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(obj.GroupVersionKind())
+
+	err := r.Get(ctx, client.ObjectKeyFromObject(obj), live)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to get live Deployment: %w", err)
+	}
+
+	if live.GetAnnotations()[metadata.ManagedAnnotation] == "true" {
+		log.FromContext(ctx).V(1).Info("Deployment marked managed; applying manifest defaults",
+			"name", obj.GetName(),
+			"namespace", obj.GetNamespace())
+
+		return nil
+	}
+
+	if err := mergeDeployments(live, obj); err != nil {
+		return fmt.Errorf("failed to merge Deployment: %w", err)
+	}
+
+	log.FromContext(ctx).V(1).Info("preserved live Deployment resources/replicas",
+		"name", obj.GetName(),
+		"namespace", obj.GetNamespace())
 
 	return nil
 }
