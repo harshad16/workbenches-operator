@@ -22,10 +22,13 @@ import (
 
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,9 +36,12 @@ import (
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	metadata "github.com/opendatahub-io/workbenches-operator/internal/metadata"
+	"github.com/opendatahub-io/workbenches-operator/internal/platformconfig"
 )
 
 const odhNotebookControllerManager = "odh-notebook-controller-manager"
+
+const workbenchesCleanupFinalizer = "components.platform.opendatahub.io/workbenches-cleanup"
 
 const (
 	timeout  = 3 * time.Minute
@@ -193,6 +199,13 @@ func componentLabelSelector() client.MatchingLabels {
 	}
 }
 
+func managedResourceLabels() client.MatchingLabels {
+	return client.MatchingLabels{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
+}
+
 func skipKustomizeGeneratedConfigMap(name string) bool {
 	return strings.HasPrefix(name, "odh-notebook-controller-image-parameters")
 }
@@ -267,4 +280,217 @@ func expectDriftRecoveryAll(
 		}, timeout, interval).Should(Succeed(),
 			"operator should recreate deleted %s %s", kind, target.GetName())
 	}
+}
+
+func upsertPlatformConfig(distributionName, distributionVersion, platformVersion string) {
+	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
+
+	cm := &corev1.ConfigMap{}
+	err := k8sClient.Get(ctx, client.ObjectKey{
+		Name:      platformconfig.ConfigMapName,
+		Namespace: operandNamespace,
+	}, cm)
+
+	data := map[string]string{
+		platformconfig.DistributionNameKey:    distributionName,
+		platformconfig.DistributionVersionKey: distributionVersion,
+	}
+	if platformVersion != "" {
+		data[platformconfig.VersionDataKey] = platformVersion
+	}
+
+	if k8serrors.IsNotFound(err) {
+		cm = &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      platformconfig.ConfigMapName,
+				Namespace: operandNamespace,
+			},
+			Data: data,
+		}
+		ExpectWithOffset(1, k8sClient.Create(ctx, cm)).To(Succeed())
+
+		return
+	}
+
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	cm.Data = data
+	ExpectWithOffset(1, k8sClient.Update(ctx, cm)).To(Succeed())
+}
+
+func waitForPlatformReleaseVersion(expected string) {
+	EventuallyWithOffset(1, func(g Gomega) {
+		wb := getWorkbenches()
+
+		for _, release := range wb.Status.Releases {
+			if release.Name == platformconfig.ReleaseName {
+				g.Expect(release.Version).To(Equal(expected),
+					"platform release version should be %q", expected)
+
+				return
+			}
+		}
+
+		g.Expect(false).To(BeTrue(), "platform release entry not found in status.releases")
+	}, timeout, interval).Should(Succeed())
+}
+
+func waitForDistributionStatus(name, version string) {
+	EventuallyWithOffset(1, func(g Gomega) {
+		wb := getWorkbenches()
+		g.Expect(wb.Status.Distribution.Name).To(Equal(name))
+		g.Expect(wb.Status.Distribution.Version).To(Equal(version))
+	}, timeout, interval).Should(Succeed())
+}
+
+func serviceHasReadyEndpoints(namespace, serviceName string) bool {
+	sliceList := &discoveryv1.EndpointSliceList{}
+	err := k8sClient.List(ctx, sliceList,
+		client.InNamespace(namespace),
+		client.MatchingLabelsSelector{
+			Selector: labels.SelectorFromSet(labels.Set{
+				discoveryv1.LabelServiceName: serviceName,
+			}),
+		},
+	)
+	if err != nil {
+		return false
+	}
+
+	for _, slice := range sliceList.Items {
+		for _, ep := range slice.Endpoints {
+			if ep.Conditions.Ready != nil && *ep.Conditions.Ready {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func waitForOperandServiceEndpoints() {
+	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
+
+	EventuallyWithOffset(1, func(g Gomega) {
+		svcList := &corev1.ServiceList{}
+		g.Expect(k8sClient.List(ctx, svcList,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(svcList.Items).NotTo(BeEmpty(),
+			"expected at least one managed operand Service in %s", operandNamespace)
+
+		for _, svc := range svcList.Items {
+			g.Expect(serviceHasReadyEndpoints(operandNamespace, svc.Name)).To(BeTrue(),
+				"operand Service %s should have ready endpoints", svc.Name)
+		}
+	}, timeout, interval).Should(Succeed())
+}
+
+func expectNoManagedOperandResources() {
+	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
+
+	EventuallyWithOffset(1, func(g Gomega) {
+		deploys := &appsv1.DeploymentList{}
+		g.Expect(k8sClient.List(ctx, deploys,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(deploys.Items).To(BeEmpty())
+
+		configMaps := &corev1.ConfigMapList{}
+		g.Expect(k8sClient.List(ctx, configMaps,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(configMaps.Items).To(BeEmpty())
+
+		services := &corev1.ServiceList{}
+		g.Expect(k8sClient.List(ctx, services,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(services.Items).To(BeEmpty())
+
+		serviceAccounts := &corev1.ServiceAccountList{}
+		g.Expect(k8sClient.List(ctx, serviceAccounts,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(serviceAccounts.Items).To(BeEmpty())
+
+		secrets := &corev1.SecretList{}
+		g.Expect(k8sClient.List(ctx, secrets,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(secrets.Items).To(BeEmpty())
+
+		roles := &unstructured.UnstructuredList{}
+		roles.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role",
+		})
+		g.Expect(k8sClient.List(ctx, roles,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(roles.Items).To(BeEmpty())
+
+		roleBindings := &unstructured.UnstructuredList{}
+		roleBindings.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding",
+		})
+		g.Expect(k8sClient.List(ctx, roleBindings,
+			client.InNamespace(operandNamespace),
+			managedResourceLabels(),
+		)).To(Succeed())
+		g.Expect(roleBindings.Items).To(BeEmpty())
+
+		clusterRoles := &unstructured.UnstructuredList{}
+		clusterRoles.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole",
+		})
+		g.Expect(k8sClient.List(ctx, clusterRoles, managedResourceLabels())).To(Succeed())
+		g.Expect(clusterRoles.Items).To(BeEmpty())
+
+		clusterRoleBindings := &unstructured.UnstructuredList{}
+		clusterRoleBindings.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding",
+		})
+		g.Expect(k8sClient.List(ctx, clusterRoleBindings, managedResourceLabels())).To(Succeed())
+		g.Expect(clusterRoleBindings.Items).To(BeEmpty())
+
+		mutatingWebhooks := &unstructured.UnstructuredList{}
+		mutatingWebhooks.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration",
+		})
+		g.Expect(k8sClient.List(ctx, mutatingWebhooks, managedResourceLabels())).To(Succeed())
+		g.Expect(mutatingWebhooks.Items).To(BeEmpty())
+
+		validatingWebhooks := &unstructured.UnstructuredList{}
+		validatingWebhooks.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration",
+		})
+		g.Expect(k8sClient.List(ctx, validatingWebhooks, managedResourceLabels())).To(Succeed())
+		g.Expect(validatingWebhooks.Items).To(BeEmpty())
+	}, timeout, interval).Should(Succeed())
+}
+
+func deleteWorkbenchesCRAndWait() {
+	wb := &componentsv1alpha1.Workbenches{}
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Name: componentsv1alpha1.WorkbenchesInstanceName,
+	}, wb)
+	if k8serrors.IsNotFound(err) {
+		return
+	}
+
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, k8sClient.Delete(ctx, wb)).To(Succeed())
+
+	EventuallyWithOffset(1, func(g Gomega) {
+		getErr := k8sClient.Get(ctx, types.NamespacedName{
+			Name: componentsv1alpha1.WorkbenchesInstanceName,
+		}, &componentsv1alpha1.Workbenches{})
+		g.Expect(k8serrors.IsNotFound(getErr)).To(BeTrue())
+	}, timeout, interval).Should(Succeed())
 }

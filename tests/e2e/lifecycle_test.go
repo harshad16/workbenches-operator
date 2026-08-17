@@ -42,6 +42,9 @@ func registerLifecycleTests() {
 	registerMLflowIntegrationTests()
 	registerDriftRecoveryTests()
 	registerOperandHealthTests()
+	registerPlatformConfigTests()
+	registerServiceHealthTests()
+	registerUpgradeTests()
 	registerManagementStateTests()
 }
 
@@ -237,13 +240,15 @@ func registerManagementStateTests() {
 				deploys := &appsv1.DeploymentList{}
 				g.Expect(k8sClient.List(ctx, deploys,
 					client.InNamespace(operandNamespace),
-					client.MatchingLabels{
-						metadata.PartOfLabelKey: metadata.ComponentLabelValue,
-					},
+					managedResourceLabels(),
 				)).To(Succeed())
 				g.Expect(deploys.Items).To(BeEmpty(),
 					"component-labeled deployments should be removed in Removed state")
 			}, timeout, interval).Should(Succeed())
+		})
+
+		It("Should remove all managed operand resource types when management state is Removed", func() {
+			expectNoManagedOperandResources()
 		})
 
 		It("Should clear status.releases when management state is Removed", func() {
