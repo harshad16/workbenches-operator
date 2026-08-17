@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func registerImageStreamStatusTests() {
@@ -30,6 +31,8 @@ func registerImageStreamStatusTests() {
 				cond := meta.FindStatusCondition(wb.Status.Conditions, "ImageStreamsAvailable")
 				g.Expect(cond).NotTo(BeNil(),
 					"ImageStreamsAvailable condition should exist when ImageStream API is available")
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue),
+					"ImageStreamsAvailable should be True when managed ImageStreams are healthy")
 			}, timeout, interval).Should(Succeed())
 		})
 	})
