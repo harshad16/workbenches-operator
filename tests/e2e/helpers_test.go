@@ -258,14 +258,20 @@ func expectDriftRecoveryAll(
 	)).To(Succeed())
 
 	objects := items()
-	ExpectWithOffset(1, objects).NotTo(BeEmpty(),
-		"at least one labeled %s should exist before drift test", kind)
+	targets := make([]client.Object, 0, len(objects))
 
-	for _, target := range objects {
-		if skip != nil && skip(target) {
+	for _, object := range objects {
+		if skip != nil && skip(object) {
 			continue
 		}
 
+		targets = append(targets, object)
+	}
+
+	ExpectWithOffset(1, targets).NotTo(BeEmpty(),
+		"at least one non-skipped labeled %s should exist before drift test", kind)
+
+	for _, target := range targets {
 		deletedUID := target.GetUID()
 		ExpectWithOffset(1, k8sClient.Delete(ctx, target)).To(Succeed())
 
@@ -313,7 +319,19 @@ func upsertPlatformConfig(distributionName, distributionVersion, platformVersion
 	}
 
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	cm.Data = data
+
+	if cm.Data == nil {
+		cm.Data = make(map[string]string)
+	}
+
+	cm.Data[platformconfig.DistributionNameKey] = distributionName
+	cm.Data[platformconfig.DistributionVersionKey] = distributionVersion
+	if platformVersion == "" {
+		delete(cm.Data, platformconfig.VersionDataKey)
+	} else {
+		cm.Data[platformconfig.VersionDataKey] = platformVersion
+	}
+
 	ExpectWithOffset(1, k8sClient.Update(ctx, cm)).To(Succeed())
 }
 
