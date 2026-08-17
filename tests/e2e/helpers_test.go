@@ -17,9 +17,11 @@ limitations under the License.
 package e2e
 
 import (
+	"strings"
 	"time"
 
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +34,8 @@ import (
 	"github.com/opendatahub-io/workbenches-operator/internal/gvk"
 	metadata "github.com/opendatahub-io/workbenches-operator/internal/metadata"
 )
+
+const odhNotebookControllerManager = "odh-notebook-controller-manager"
 
 const (
 	timeout  = 3 * time.Minute
@@ -183,38 +187,84 @@ func ensureCreated(obj client.Object) {
 
 // expectDriftRecovery deletes the first component-labeled object from list and
 // waits for the operator to recreate it with a new UID.
-func expectDriftRecovery(
+func componentLabelSelector() client.MatchingLabels {
+	return client.MatchingLabels{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+	}
+}
+
+func skipKustomizeGeneratedConfigMap(name string) bool {
+	return strings.HasPrefix(name, "odh-notebook-controller-image-parameters")
+}
+
+func waitForMLflowEnabled(expected string) {
+	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
+
+	EventuallyWithOffset(1, func(g Gomega) {
+		deploy := &appsv1.Deployment{}
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      odhNotebookControllerManager,
+			Namespace: operandNamespace,
+		}, deploy)).To(Succeed())
+
+		var mlflowValue string
+
+		for _, c := range deploy.Spec.Template.Spec.Containers {
+			if c.Name != "manager" {
+				continue
+			}
+
+			for _, env := range c.Env {
+				if env.Name == "MLFLOW_ENABLED" {
+					mlflowValue = env.Value
+
+					break
+				}
+			}
+		}
+
+		g.Expect(mlflowValue).To(Equal(expected),
+			"MLFLOW_ENABLED on %s should be %q", odhNotebookControllerManager, expected)
+	}, timeout, interval).Should(Succeed())
+}
+
+// expectDriftRecoveryAll deletes every component-labeled object in list and
+// waits for the operator to recreate each one (parity with odh-operator e2e).
+func expectDriftRecoveryAll(
 	kind string,
 	list client.ObjectList,
-	firstItem func() client.Object,
+	items func() []client.Object,
 	newObj func() client.Object,
+	skip func(client.Object) bool,
 ) {
 	ExpectWithOffset(1, operandNamespace).NotTo(BeEmpty())
 
-	componentLabels := client.MatchingLabels{
-		metadata.ComponentLabelKey: metadata.LabelTrue,
-	}
-
 	ExpectWithOffset(1, k8sClient.List(ctx, list,
 		client.InNamespace(operandNamespace),
-		componentLabels,
+		componentLabelSelector(),
 	)).To(Succeed())
 
-	target := firstItem()
-	ExpectWithOffset(1, target).NotTo(BeNil(),
+	objects := items()
+	ExpectWithOffset(1, objects).NotTo(BeEmpty(),
 		"at least one labeled %s should exist before drift test", kind)
 
-	deletedUID := target.GetUID()
-	ExpectWithOffset(1, k8sClient.Delete(ctx, target)).To(Succeed())
+	for _, target := range objects {
+		if skip != nil && skip(target) {
+			continue
+		}
 
-	EventuallyWithOffset(1, func(g Gomega) {
-		fresh := newObj()
-		g.Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      target.GetName(),
-			Namespace: target.GetNamespace(),
-		}, fresh)).To(Succeed())
-		g.Expect(fresh.GetUID()).NotTo(Equal(deletedUID),
-			"recreated %s should have a new UID", kind)
-	}, timeout, interval).Should(Succeed(),
-		"operator should recreate the deleted %s", kind)
+		deletedUID := target.GetUID()
+		ExpectWithOffset(1, k8sClient.Delete(ctx, target)).To(Succeed())
+
+		EventuallyWithOffset(1, func(g Gomega) {
+			fresh := newObj()
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      target.GetName(),
+				Namespace: target.GetNamespace(),
+			}, fresh)).To(Succeed())
+			g.Expect(fresh.GetUID()).NotTo(Equal(deletedUID),
+				"recreated %s %s should have a new UID", kind, target.GetName())
+		}, timeout, interval).Should(Succeed(),
+			"operator should recreate deleted %s %s", kind, target.GetName())
+	}
 }
