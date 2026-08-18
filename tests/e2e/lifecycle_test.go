@@ -252,8 +252,10 @@ func registerManagementStateTests() {
 		})
 
 		It("Should clear status.releases when management state is Removed", func() {
-			wb := getWorkbenches()
-			Expect(wb.Status.Releases).To(BeEmpty())
+			Eventually(func(g Gomega) {
+				wb := getWorkbenches()
+				g.Expect(wb.Status.Releases).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 
