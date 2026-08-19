@@ -1,4 +1,18 @@
 #!/bin/bash
+# Re-exec with a newer bash if the current one lacks associative-array support
+# (added in bash 4.0). macOS ships bash 3.2 as /bin/bash, which the Makefile
+# invokes directly — look for a modern bash in common locations so this script
+# works out of the box without requiring PATH changes.
+if [[ -z "${WORKBENCHES_BASH_REEXEC:-}" ]] && (( BASH_VERSINFO[0] < 4 )); then
+    for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash /usr/local/opt/bash/bin/bash; do
+        if [[ -x "${candidate}" ]] && "${candidate}" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null; then
+            WORKBENCHES_BASH_REEXEC=1 exec "${candidate}" "$0" "$@"
+        fi
+    done
+    echo "ERROR: bash >= 4.0 is required (found ${BASH_VERSION}). On macOS, run: brew install bash" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 # Workbenches module operator manifest fetching script.
@@ -32,6 +46,7 @@ declare -A ODH_COMPONENT_MANIFESTS=(
     ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:main:components/notebook-controller/config"
     ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:main:components/odh-notebook-controller/config"
     ["workbenches/notebooks"]="opendatahub-io:notebooks:main:manifests"
+    ["workbenches/workspaces-controller"]="opendatahub-io:workbenches:main:workspaces/controller/manifests/kustomize"
 )
 
 # RHOAI (downstream) Component Manifests
@@ -39,6 +54,7 @@ declare -A RHOAI_COMPONENT_MANIFESTS=(
     ["workbenches/kf-notebook-controller"]="red-hat-data-services:kubeflow:main:components/notebook-controller/config"
     ["workbenches/odh-notebook-controller"]="red-hat-data-services:kubeflow:main:components/odh-notebook-controller/config"
     ["workbenches/notebooks"]="red-hat-data-services:notebooks:main:manifests"
+    ["workbenches/workspaces-controller"]="red-hat-data-services:workbenches:main:workspaces/controller/manifests/kustomize"
 )
 
 # Select manifests based on platform type (default: OpenDataHub / upstream).
