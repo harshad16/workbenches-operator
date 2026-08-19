@@ -65,8 +65,20 @@ case "${platform_type}" in
         ;;
 esac
 
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 is required to canonicalize paths (macOS/BSD lack GNU realpath -m)"
+    exit 1
+fi
+
+# GNU realpath -m canonicalizes paths that may not exist yet; macOS/BSD realpath lacks -m.
+# Mirrors realpath -m: resolve existing symlinks; keep missing trailing components.
+canonicalize_path() {
+    python3 -c 'import os, sys
+print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
 # Resolve MANIFEST_DIR once so destination jail checks use a stable absolute prefix.
-MANIFEST_DIR="$(realpath -m "${MANIFEST_DIR}")"
+MANIFEST_DIR="$(canonicalize_path "${MANIFEST_DIR}")"
 
 # Parse command line overrides
 for arg in "$@"; do
@@ -121,7 +133,7 @@ fetch_manifests() {
 
     local repo_url="https://github.com/${org}/${repo}.git"
     local clone_dir
-    clone_dir="$(clone_dir_for "${org}" "${repo}" "${branch_sha}")"
+    clone_dir="$(canonicalize_path "$(clone_dir_for "${org}" "${repo}" "${branch_sha}")")"
 
     echo "Fetching ${target} from ${repo_url} (branch: ${branch}, sha: ${sha:-HEAD})"
 
@@ -142,14 +154,14 @@ fetch_manifests() {
     fi
 
     local resolved
-    resolved="$(realpath -m "${clone_dir}/${source_path}")"
+    resolved="$(canonicalize_path "${clone_dir}/${source_path}")"
     if [[ "${resolved}" != "${clone_dir}"/* ]]; then
         echo "ERROR: source_path '${source_path}' escapes clone directory"
         exit 1
     fi
 
     local dest
-    dest="$(realpath -m "${MANIFEST_DIR}/${target}")"
+    dest="$(canonicalize_path "${MANIFEST_DIR}/${target}")"
     if [[ "${dest}" != "${MANIFEST_DIR}" && "${dest}" != "${MANIFEST_DIR}"/* ]]; then
         echo "ERROR: target '${target}' escapes manifest directory '${MANIFEST_DIR}'"
         exit 1
