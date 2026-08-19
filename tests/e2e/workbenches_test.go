@@ -18,11 +18,6 @@ package e2e
 
 import (
 	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-
-	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
 )
 
 // Single Ordered Describe ensures deterministic execution order across all
@@ -31,25 +26,9 @@ import (
 var _ = Describe("Workbenches E2E", Ordered, func() {
 	registerLifecycleTests()
 	registerWebhookTests()
+	registerFinalizerTests()
 
 	AfterAll(func() {
-		wb := &componentsv1alpha1.Workbenches{}
-
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name: componentsv1alpha1.WorkbenchesInstanceName,
-		}, wb)
-		if errors.IsNotFound(err) {
-			return
-		}
-
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Delete(ctx, wb)).To(Succeed())
-
-		Eventually(func(g Gomega) {
-			getErr := k8sClient.Get(ctx, types.NamespacedName{
-				Name: componentsv1alpha1.WorkbenchesInstanceName,
-			}, &componentsv1alpha1.Workbenches{})
-			g.Expect(errors.IsNotFound(getErr)).To(BeTrue(), "expected NotFound, got: %v", getErr)
-		}, timeout, interval).Should(Succeed(), "Workbenches CR should be deleted")
+		deleteWorkbenchesCRAndWait()
 	})
 })
