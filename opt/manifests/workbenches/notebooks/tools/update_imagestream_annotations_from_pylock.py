@@ -50,10 +50,13 @@ ROOT = SCRIPT_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from manifests.tools.commit_env_refs import parse_env_file  # noqa: E402
-from manifests.tools.generate_kustomization import Workbench, discover_config  # noqa: E402
-from manifests.tools.package_names import manifest_name_to_pip  # noqa: E402
-from tests.manifests import (  # noqa: E402
+from manifests.tools.commit_env_refs import parse_env_file  # ruff: ignore[module-import-not-at-top-of-file]
+from manifests.tools.generate_kustomization import (  # ruff: ignore[module-import-not-at-top-of-file]
+    Workbench,
+    discover_config,
+)
+from manifests.tools.package_names import manifest_name_to_pip  # ruff: ignore[module-import-not-at-top-of-file]
+from tests.manifests import (  # ruff: ignore[module-import-not-at-top-of-file]
     extract_metadata_from_path,
     get_source_of_truth_filepath,
 )
@@ -74,6 +77,8 @@ _ACCELERATOR_OVERRIDE_FOR_RESOURCE: dict[str, str | None] = {
     "jupyter-rocm-pytorch-notebook-imagestream.yaml": "rocm",
     "jupyter-rocm-tensorflow-notebook-imagestream.yaml": "rocm",
     "jupyter-pytorch-llmcompressor-imagestream.yaml": "cuda",
+    "jupyter-baseline-notebook-imagestream.yaml": None,
+    "code-server-baseline-notebook-imagestream.yaml": None,
 }
 
 # Canonical Git URLs for ``git fetch`` when the ``-n`` tag commit is not already in the local object DB.
@@ -151,7 +156,7 @@ def _discover_candidate_dirs() -> list[Path]:
         "Pipfile.lock.cpu",
         "Pipfile.lock.gpu",
     )
-    roots = ("jupyter", "codeserver")
+    roots = ("jupyter", "codeserver", "codeserver-baseline", "runtimes")
     seen: set[Path] = set()
     out: list[Path] = []
     for root in roots:

@@ -9,12 +9,51 @@ metadata:
     opendatahub.io/notebook-image-name: "Jupyter | Data Science | CPU | Python 3.12"
     opendatahub.io/notebook-image-desc: "Jupyter notebook image with a set of data science libraries that advanced AI/ML notebooks will use as a base image to provide a standard for libraries avialable in all notebooks"
     opendatahub.io/notebook-image-order: "10"
+    opendatahub.io/notebook-tier: "secure"
   name: s2i-generic-data-science-notebook
 spec:
   lookupPolicy:
     local: true
   tags:
     # N Version of the image
+    - annotations:
+        # language=json
+        opendatahub.io/notebook-software: |
+          [
+            {"name": "Python", "version": "v3.12"}
+          ]
+        # language=json
+        opendatahub.io/notebook-python-dependencies: |
+          [
+            {"name": "JupyterLab", "version": "4.5"},
+            {"name": "Boto3", "version": "1.43"},
+            {"name": "Kafka-Python-ng", "version": "2.2"},
+            {"name": "Kfp", "version": "2.17"},
+            {"name": "Matplotlib", "version": "3.11"},
+            {"name": "Numpy", "version": "2.5"},
+            {"name": "Pandas", "version": "2.3"},
+            {"name": "Scikit-learn", "version": "1.9"},
+            {"name": "Scipy", "version": "1.18"},
+            {"name": "Odh-Elyra", "version": "5.0"},
+            {"name": "PyMongo", "version": "4.18"},
+            {"name": "Pyodbc", "version": "5.3"},
+            {"name": "Codeflare-SDK", "version": "0.38"},
+            {"name": "Feast", "version": "0.66"},
+            {"name": "Sklearn-onnx", "version": "1.20"},
+            {"name": "Psycopg", "version": "3.3"},
+            {"name": "MySQL Connector/Python", "version": "26.7"},
+            {"name": "MLflow", "version": "3.16"}
+          ]
+        openshift.io/imported-from: registry.redhat.io/rhoai/odh-workbench-jupyter-datascience-cpu-py312-rhel9
+        opendatahub.io/workbench-image-recommended: 'true'
+        opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py312-ubi9-commit-n_PLACEHOLDER
+      from:
+        kind: DockerImage
+        name: odh-workbench-jupyter-datascience-cpu-py312-ubi9-n_PLACEHOLDER
+      name: "3.6"
+      referencePolicy:
+        type: Source
+    # N - 1 Version of the image
     - annotations:
         # language=json
         opendatahub.io/notebook-software: |
@@ -41,15 +80,14 @@ spec:
             {"name": "Sklearn-onnx", "version": "1.20"},
             {"name": "Psycopg", "version": "3.3"},
             {"name": "MySQL Connector/Python", "version": "9.7"},
-            {"name": "Kubeflow-Training", "version": "1.9"},
             {"name": "MLflow", "version": "3.14"}
           ]
         openshift.io/imported-from: registry.redhat.io/rhoai/odh-workbench-jupyter-datascience-cpu-py312-rhel9
-        opendatahub.io/workbench-image-recommended: 'true'
-        opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py312-ubi9-commit-n_PLACEHOLDER
+        opendatahub.io/workbench-image-recommended: 'false'
+        opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py312-ubi9-commit-3-5_PLACEHOLDER
       from:
         kind: DockerImage
-        name: odh-workbench-jupyter-datascience-cpu-py312-ubi9-n_PLACEHOLDER
+        name: odh-workbench-jupyter-datascience-cpu-py312-ubi9-3-5_PLACEHOLDER
       name: "3.5"
       referencePolicy:
         type: Source
@@ -80,12 +118,11 @@ spec:
             {"name": "Sklearn-onnx", "version": "1.20"},
             {"name": "Psycopg", "version": "3.3"},
             {"name": "MySQL Connector/Python", "version": "9.6"},
-            {"name": "Kubeflow-Training", "version": "1.9"},
             {"name": "MLflow", "version": "3.10"}
           ]
         openshift.io/imported-from: registry.redhat.io/rhoai/odh-workbench-jupyter-datascience-cpu-py312-rhel9
-        opendatahub.io/workbench-image-recommended: 'false'
         opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py312-ubi9-commit-3-4_PLACEHOLDER
+        opendatahub.io/image-tag-outdated: 'true'
       from:
         kind: DockerImage
         name: odh-workbench-jupyter-datascience-cpu-py312-ubi9-3-4_PLACEHOLDER
@@ -118,12 +155,11 @@ spec:
             {"name": "Feast", "version": "0.59"},
             {"name": "Sklearn-onnx", "version": "1.19"},
             {"name": "Psycopg", "version": "3.2"},
-            {"name": "MySQL Connector/Python", "version": "9.4"},
-            {"name": "Kubeflow-Training", "version": "1.9"}
+            {"name": "MySQL Connector/Python", "version": "9.4"}
           ]
         openshift.io/imported-from: registry.redhat.io/rhoai/odh-workbench-jupyter-datascience-cpu-py312-rhel9
-        opendatahub.io/workbench-image-recommended: 'false'
         opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py312-ubi9-commit-2025-2_PLACEHOLDER
+        opendatahub.io/workbench-image-recommended: 'false'
       from:
         kind: DockerImage
         name: odh-workbench-jupyter-datascience-cpu-py312-ubi9-2025-2_PLACEHOLDER
@@ -155,11 +191,10 @@ spec:
             {"name": "Codeflare-SDK", "version": "0.30"},
             {"name": "Sklearn-onnx", "version": "1.18"},
             {"name": "Psycopg", "version": "3.2"},
-            {"name": "MySQL Connector/Python", "version": "9.3"},
-            {"name": "Kubeflow-Training", "version": "1.9"}
+            {"name": "MySQL Connector/Python", "version": "9.3"}
           ]
         openshift.io/imported-from: registry.redhat.io/rhoai/odh-workbench-jupyter-datascience-cpu-py311-rhel9
-        opendatahub.io/image-tag-outdated: "true"
+        opendatahub.io/image-tag-outdated: 'true'
         opendatahub.io/notebook-build-commit: odh-workbench-jupyter-datascience-cpu-py311-ubi9-commit-2025-1_PLACEHOLDER
       from:
         kind: DockerImage
