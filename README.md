@@ -378,10 +378,12 @@ Security scanning: [gitleaks](.gitleaks.toml) for secret detection and [Semgrep]
 
 Pipelines in [`.tekton/`](.tekton/) build and publish the operator image via Konflux. Builds are hermetic: they consume committed `opt/manifests/` rather than cloning upstream at build time.
 
+Branch sync keeps the target `.tekton/` directory, so do not copy branch-specific tags from this README. The live trigger and `output-image` are in those PipelineRuns. Typical mapping:
+
 | Pipeline | Trigger | Output image |
 |----------|---------|--------------|
-| `odh-workbenches-operator-on-pull-request` | PR to `main` | `quay.io/opendatahub/odh-workbenches-operator:odh-pr` (expires after 7d) |
-| `odh-workbenches-operator-on-push` | Push to `main` | `quay.io/opendatahub/odh-workbenches-operator:odh-stable` |
+| `odh-workbenches-operator-on-pull-request` | PR to that branch | `quay.io/opendatahub/odh-workbenches-operator:odh-pr` (expires after 7d) |
+| `odh-workbenches-operator-on-push` | Push to that branch | `quay.io/opendatahub/odh-workbenches-operator:<tag>` (for example `:main` on `main`, `:odh-stable` on `stable`) |
 
 ## Project layout
 
