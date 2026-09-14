@@ -43,10 +43,10 @@ MANIFEST_DIR="${MANIFEST_DIR:-opt/manifests}"
 
 # ODH (upstream) Component Manifests
 declare -A ODH_COMPONENT_MANIFESTS=(
-    ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:v1.10.0-15@9945627f2bbc1fd37c36c528bf41b9d1589d0561:components/notebook-controller/config"
-    ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:v1.10.0-15@9945627f2bbc1fd37c36c528bf41b9d1589d0561:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="opendatahub-io:notebooks:v1.48.0@fb31a5a15294d30dbd00043558d9fb3a637fd22a:manifests"
-    ["workbenches/workspaces-controller"]="opendatahub-io:workbenches:v2.0.0@c068896fd61b55eedd13ae8daa869a1bf12024f8:workspaces/controller/manifests/kustomize"
+    ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:stable@7e8fac8afa9930d836c056a408c3ff8b4bdd4c75:components/notebook-controller/config"
+    ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:stable@7e8fac8afa9930d836c056a408c3ff8b4bdd4c75:components/odh-notebook-controller/config"
+    ["workbenches/notebooks"]="opendatahub-io:notebooks:stable@c43ac17669ab1bf159439c91cc252920f29b969e:manifests"
+    ["workbenches/workspaces-controller"]="opendatahub-io:workbenches:stable@f784516c66c7987c02ce8aaa2b37de9127104f1d:workspaces/controller/manifests/kustomize"
 )
 
 # RHOAI (downstream) Component Manifests
