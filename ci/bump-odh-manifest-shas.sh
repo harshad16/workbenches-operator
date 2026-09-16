@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Bump ODH_COMPONENT_MANIFESTS branch@sha pins in get_all_manifests.sh to the
+# Bump ODH_COMPONENT_MANIFESTS branch@sha pins in opt/manifest-sources.sh to the
 # current HEAD of each tracking branch (for example stable). RHOAI pins are left
 # unchanged. Used by .github/workflows/manifests-sync-stable.yaml and for local refresh:
 #   bash ci/bump-odh-manifest-shas.sh && make manifests-fetch
+#
+# Exits non-zero when no ODH branch@sha pins are present so unpinned branch
+# heads are not fetched by accident.
 set -euo pipefail
 
-SCRIPT_FILE="${1:-get_all_manifests.sh}"
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_FILE="${1:-${_script_dir}/../opt/manifest-sources.sh}"
 
 if [[ ! -f "${SCRIPT_FILE}" ]]; then
     echo "ERROR: ${SCRIPT_FILE} not found" >&2
@@ -47,6 +51,12 @@ token = os.environ.get("GH_TOKEN", "")
 resolved: dict[tuple[str, str, str], str] = {}
 updated = False
 
+if not pin_re.search(match.group(1)):
+    raise SystemExit(
+        "no ODH branch@sha pins found in "
+        f"{script_path}; refusing to fetch unpinned branch heads"
+    )
+
 
 def head_sha(org: str, repo: str, branch: str) -> str:
     key = (org, repo, branch)
@@ -80,10 +90,6 @@ def replace_pin(m: re.Match[str]) -> str:
 
 
 new_block = pin_re.sub(replace_pin, match.group(1))
-if not pin_re.search(match.group(1)):
-    print("No ODH branch@sha pins found; nothing to update.")
-    sys.exit(0)
-
 script_path.write_text(text[: match.start(1)] + new_block + text[match.end(1) :])
 if updated:
     print(f"Updated ODH tracking SHAs in {script_path}")

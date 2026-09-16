@@ -22,6 +22,7 @@ set -euo pipefail
 # daily on main (PR). .github/workflows/manifests-sync-stable.yaml refreshes
 # manifests on each push to stable/v1.x (direct commit; SHA pin bump on stable only).
 #
+# Operand org/repo/ref maps live in opt/manifest-sources.sh (per operator branch).
 # Platform selection (mirrors opendatahub-operator / rhods-operator):
 #   ODH_PLATFORM_TYPE=OpenDataHub  (default) — opendatahub-io upstream sources
 #   ODH_PLATFORM_TYPE=rhoai        — red-hat-data-services RHOAI/downstream sources
@@ -31,34 +32,23 @@ set -euo pipefail
 #   bash ci/bump-odh-manifest-shas.sh && ./get_all_manifests.sh   # refresh ODH branch@sha pins first
 #   ODH_PLATFORM_TYPE=rhoai ./get_all_manifests.sh
 #
-# The script clones from the specified org/repo at the given branch@sha,
-# then copies source_path contents into opt/manifests/<target>.
+# The script clones from the specified org/repo at the given ref, then copies
+# source_path contents into opt/manifests/<target>.
 
 MANIFEST_DIR="${MANIFEST_DIR:-opt/manifests}"
 
-# {ODH,RHOAI}_COMPONENT_MANIFESTS are lists of component repositories to fetch.
-# Format: "repo-org:repo-name:ref-name:source-folder"
-# Key is the target folder under opt/manifests/
-# ref-name supports:
-#   1. "branch"              — latest commit on branch (e.g., main)
-#   2. "tag"                 — immutable reference (e.g., v1.0.0)
-#   3. "branch@commit-sha"   — branch tracking pin (e.g., main@a1b2c3d4)
-
-# ODH (upstream) Component Manifests
-declare -A ODH_COMPONENT_MANIFESTS=(
-    ["workbenches/kf-notebook-controller"]="opendatahub-io:kubeflow:main:components/notebook-controller/config"
-    ["workbenches/odh-notebook-controller"]="opendatahub-io:kubeflow:main:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="opendatahub-io:notebooks:main:manifests"
-    ["workbenches/workspaces-controller"]="opendatahub-io:workbenches:main:workspaces/controller/manifests/kustomize"
-)
-
-# RHOAI (downstream) Component Manifests
-declare -A RHOAI_COMPONENT_MANIFESTS=(
-    ["workbenches/kf-notebook-controller"]="red-hat-data-services:kubeflow:main:components/notebook-controller/config"
-    ["workbenches/odh-notebook-controller"]="red-hat-data-services:kubeflow:main:components/odh-notebook-controller/config"
-    ["workbenches/notebooks"]="red-hat-data-services:notebooks:main:manifests"
-    ["workbenches/workspaces-controller"]="red-hat-data-services:workbenches:main:workspaces/controller/manifests/kustomize"
-)
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCES_FILE="${_script_dir}/opt/manifest-sources.sh"
+if [[ ! -f "${SOURCES_FILE}" ]]; then
+    echo "ERROR: missing operand source map '${SOURCES_FILE}'" >&2
+    exit 1
+fi
+# shellcheck source=opt/manifest-sources.sh
+source "${SOURCES_FILE}"
+if (( ${#ODH_COMPONENT_MANIFESTS[@]} < 1 )) || (( ${#RHOAI_COMPONENT_MANIFESTS[@]} < 1 )); then
+    echo "ERROR: ${SOURCES_FILE} must declare ODH_COMPONENT_MANIFESTS and RHOAI_COMPONENT_MANIFESTS" >&2
+    exit 1
+fi
 
 # Select manifests based on platform type (default: OpenDataHub / upstream).
 # Only documented selectors are accepted — typos must not silently pick RHOAI.
