@@ -86,6 +86,12 @@ jobs:
           kubectl wait --for=condition=Available --timeout=120s \
             deployment/service-ca -n openshift-service-ca
 
+      - name: Install Prometheus Operator ServiceMonitor CRD (Kind lacks Prometheus Operator)
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.80.1/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/servicemonitors.monitoring.coreos.com
+
       - name: Fetch upstream manifests
         env:
           ODH_PLATFORM_TYPE: OpenDataHub
