@@ -370,18 +370,20 @@ Workflows run on pushes and PRs to `main`, `stable`, and `v1.x` (except manifest
 
 Coverage is uploaded to Codecov ([`codecov.yml`](codecov.yml)).
 
-[Dependabot](`.github/dependabot.yml`) is configured for weekly GitHub Actions version bumps and Go module security-only updates.
+[Dependabot](.github/dependabot.yml) is configured for weekly GitHub Actions version bumps and Go module security-only updates.
 
-Security scanning: [gitleaks](`.gitleaks.toml`) for secret detection and [Semgrep](`semgrep.yaml`) for TLS compliance rules.
+Security scanning: [gitleaks](.gitleaks.toml) for secret detection and [Semgrep](semgrep.yaml) for TLS compliance rules.
 
 ### Konflux / Tekton
 
 Pipelines in [`.tekton/`](.tekton/) build and publish the operator image via Konflux. Builds are hermetic: they consume committed `opt/manifests/` rather than cloning upstream at build time.
 
+Branch sync keeps the target `.tekton/` directory, so do not copy branch-specific tags from this README. The live trigger and `output-image` are in those PipelineRuns. Typical mapping:
+
 | Pipeline | Trigger | Output image |
 |----------|---------|--------------|
-| `odh-workbenches-operator-on-pull-request` | PR to `main` | `quay.io/opendatahub/odh-workbenches-operator:odh-pr` (expires after 7d) |
-| `odh-workbenches-operator-on-push` | Push to `main` | `quay.io/opendatahub/odh-workbenches-operator:odh-stable` |
+| `odh-workbenches-operator-on-pull-request` | PR to that branch | `quay.io/opendatahub/odh-workbenches-operator:odh-pr` (expires after 7d) |
+| `odh-workbenches-operator-on-push` | Push to that branch | `quay.io/opendatahub/odh-workbenches-operator:<tag>` (for example `:main` on `main`, `:odh-stable` on `stable`) |
 
 ## Project layout
 
@@ -449,7 +451,7 @@ Run `make help` for the full list. Common targets:
 
 | Tool | Makefile variable | Version |
 |------|-------------------|---------|
-| Go | (`go.mod`) | 1.26.2 |
+| Go | (`go.mod`) | 1.26.7 |
 | Kustomize | `KUSTOMIZE_VERSION` | v5.6.0 |
 | controller-gen | `CONTROLLER_TOOLS_VERSION` | v0.18.0 |
 | setup-envtest | `ENVTEST_VERSION` | release-0.23 |
