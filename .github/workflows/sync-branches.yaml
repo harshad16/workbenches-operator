@@ -49,6 +49,8 @@ on:
         type: boolean
         default: false
 
+permissions: {}
+
 jobs:
   sync-branches:
     runs-on: ubuntu-latest
