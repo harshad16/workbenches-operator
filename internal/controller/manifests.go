@@ -386,6 +386,10 @@ func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[str
 // For Deployments, live container resources and replicas are merged onto the rendered
 // manifest before SSA unless the live object has opendatahub.io/managed=true (parity with
 // the former in-tree workbenches deploy.MergeDeployments path).
+//
+// For Services, live spec.ports are rewritten when SSA would keep a stale port
+// that shares a name with a desired port at a different port number (Kubernetes
+// merge key is port+protocol, but names must be unique).
 func (r *WorkbenchesReconciler) applyObjects(
 	ctx context.Context,
 	owner *componentsv1alpha1.Workbenches,
@@ -409,6 +413,11 @@ func (r *WorkbenchesReconciler) applyObjects(
 
 		if err := r.preserveDeploymentCustomizations(ctx, obj); err != nil {
 			return fmt.Errorf("failed to preserve Deployment customizations for %s/%s: %w",
+				obj.GetNamespace(), obj.GetName(), err)
+		}
+
+		if err := r.prepareServiceForSSA(ctx, obj); err != nil {
+			return fmt.Errorf("failed to prepare Service %s/%s for SSA: %w",
 				obj.GetNamespace(), obj.GetName(), err)
 		}
 
