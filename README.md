@@ -354,14 +354,17 @@ kubectl get workbenches default-workbenches
 
 ### GitHub Actions
 
-Workflows run on pushes and PRs to `main`, `stable`, and `v1.x`. Manifest sync on `main` is scheduled; on `stable`/`v1.x` it runs on push (and daily on `stable`):
+Most workflows run on pushes and PRs to `main`, `stable`, and `v1.x`. Manifest sync on `main` is scheduled; on `stable`/`v1.x` it runs on push (and daily on `stable`). Other scheduled and path-filtered workflows are noted below.
 
 | Workflow | Purpose |
 |----------|---------|
 | [`test.yml`](.github/workflows/test.yml) | Unit tests and manifest rendering validation |
 | [`build.yml`](.github/workflows/build.yml) | `make build` |
-| [`lint.yml`](.github/workflows/lint.yml) | golangci-lint, go vet, kube-linter, Helm lint, chart sync checks, verify-manifests, verify-generate |
+| [`lint.yml`](.github/workflows/lint.yml) | pre-commit, golangci-lint, go vet, go mod verify, kube-linter, Helm lint, chart sync checks, verify-manifests, verify-generate |
 | [`e2e.yml`](.github/workflows/e2e.yml) | End-to-end tests on Kind cluster |
+| [`govulncheck.yaml`](.github/workflows/govulncheck.yaml) | Go vulnerability scan on push to `main` (also `workflow_dispatch`) |
+| [`disconnected-readiness.yaml`](.github/workflows/disconnected-readiness.yaml) | Airgapped/disconnected readiness check on PRs |
+| [`operator-chaos-validation.yaml`](.github/workflows/operator-chaos-validation.yaml) | operator-chaos shift-left validation (knowledge, CRD diff, upgrade dry-run) on PRs touching `chaos/`, `api/`, `internal/controller/`, or `config/crd/` |
 | [`go-directive-updater.yaml`](.github/workflows/go-directive-updater.yaml) | Weekly Go patch version bumps |
 | [`manifests-sync-main.yaml`](.github/workflows/manifests-sync-main.yaml) | Daily upstream manifest sync PRs against `main` |
 | [`manifests-sync-stable.yaml`](.github/workflows/manifests-sync-stable.yaml) | On push to `stable`/`v1.x` (daily on `stable`): commit manifests directly (SHA pin bump on `stable` only) |
@@ -373,7 +376,9 @@ Coverage is uploaded to Codecov ([`codecov.yml`](codecov.yml)).
 
 [Dependabot](.github/dependabot.yml) is configured for weekly GitHub Actions version bumps and Go module security-only updates.
 
-Security scanning: [gitleaks](.gitleaks.toml) for secret detection and [Semgrep](semgrep.yaml) for TLS compliance rules.
+Local hygiene hooks live in [`.pre-commit-config.yaml`](.pre-commit-config.yaml) (`golangci-lint` is skipped in CI because `lint.yml` already runs it).
+
+Security scanning: [gitleaks](.gitleaks.toml) for secret detection, [Semgrep](semgrep.yaml) for TLS compliance rules, and [`govulncheck`](.github/workflows/govulncheck.yaml) for Go dependency vulnerabilities.
 
 ### Konflux / Tekton
 
@@ -392,6 +397,7 @@ Branch sync keeps the target `.tekton/` directory, so do not copy branch-specifi
 .
 ├── api/v1alpha1/              # Workbenches CRD Go types
 ├── charts/operator/           # Helm chart (synced from config/)
+├── chaos/                     # operator-chaos knowledge (ODH/RHOAI profiles) + experiments
 ├── ci/                        # Go version bump helper scripts
 ├── cmd/main.go                # Operator entrypoint
 ├── config/
@@ -421,6 +427,7 @@ Branch sync keeps the target `.tekton/` directory, so do not copy branch-specifi
 ├── hack/                      # Chart sync/verify scripts
 ├── .github/dependabot.yml     # Dependabot config (GHA + Go security)
 ├── .gitleaks.toml             # Secret scanning configuration (gitleaks)
+├── .pre-commit-config.yaml    # pre-commit hooks (CI + local)
 ├── semgrep.yaml               # Semgrep TLS compliance rules
 ├── get_all_manifests.sh       # Upstream manifest fetch script
 ├── tests/e2e/                 # End-to-end Ginkgo tests (Kind in CI)
@@ -468,6 +475,7 @@ Review [`OWNERS`](OWNERS) for approvers and reviewers. Open pull requests agains
 - When upstream notebook controller manifests add or rename ClusterRoles, update [`config/rbac/rbac_escalate_role.yaml`](config/rbac/rbac_escalate_role.yaml) and run `make chart-sync-rbac`.
 - After changing kubebuilder markers, run `make manifests` and `make chart-sync`.
 - When refreshing upstream manifests, commit `opt/manifests/` together with any `opt/manifest-sources.sh` source changes.
+- When operand topology, webhooks, or notebook ImageStreams change, update the matching chaos profile under [`chaos/profiles/odh`](chaos/profiles/odh) or [`chaos/profiles/rhoai`](chaos/profiles/rhoai).
 - See [`DEPENDENCIES.md`](DEPENDENCIES.md) for Go version, dependency, and upstream manifest upgrade procedures.
 - Agent-oriented project conventions live in [`AGENTS.md`](AGENTS.md).
 
