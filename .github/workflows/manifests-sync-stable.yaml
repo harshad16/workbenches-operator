@@ -7,7 +7,9 @@
 #      (v1.x skips bump-shas because pins are tags, not tracking branches)
 #
 # Both jobs commit directly to the branch (no PR). Skips the workflow's own
-# chore(manifests) commits to avoid a push loop.
+# chore(manifests) commits to avoid a push loop. Matrix jobs use
+# fromJSON(... || '[]') because those skipped runs leave outputs.branches
+# empty and GitHub still evaluates strategy.matrix for always() jobs.
 # Direct push requires contents:write (GITHUB_TOKEN or MANIFEST_SYNC_PAT) and
 # branch protection that allows GitHub Actions to push.
 name: Sync upstream manifests (stable/v1.x)
@@ -81,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.resolve-branches.outputs.branches) }}
+        branch: ${{ fromJSON(needs.resolve-branches.outputs.branches || '[]') }}
     permissions:
       contents: write
     env:
@@ -140,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.resolve-branches.outputs.branches) }}
+        branch: ${{ fromJSON(needs.resolve-branches.outputs.branches || '[]') }}
     permissions:
       contents: write
     env:
