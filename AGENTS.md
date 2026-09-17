@@ -11,7 +11,7 @@ This is a Kubernetes operator (built with Kubebuilder/controller-runtime) that m
 
 - **Singleton CR**: Only one `Workbenches` resource is allowed, and it must be named `default-workbenches`. Enforced via CEL on the CRD (`WorkbenchesInstanceName` in `api/v1alpha1`).
 - **Manifest rendering**: The operator reads Kustomize bundles from a filesystem path (`--manifests-base-path`, default `/opt/manifests`) and renders them at runtime with the krusty engine — it does not embed manifests in Go code.
-- **Committed manifests**: Operand manifests under `opt/manifests/` are fetched by `get_all_manifests.sh`, committed to the repo, and copied into the image at build time. Do not hand-edit them. The script has ODH and RHOAI source maps; `ODH_PLATFORM_TYPE` selects which (`OpenDataHub` default or `rhoai` for downstream).
+- **Committed manifests**: Operand manifests under `opt/manifests/` are fetched by `get_all_manifests.sh`, committed to the repo, and copied into the image at build time. Do not hand-edit them. Operand org/repo/ref maps live in `opt/manifest-sources.sh` (kept per branch by `sync-branches.yaml`); `ODH_PLATFORM_TYPE` selects ODH or RHOAI (`OpenDataHub` default or `rhoai` for downstream).
 - **Server-side apply**: Manifest application uses SSA with field manager `workbenches-operator`.
 - **Platform awareness**: Platforms `OpenDataHub` and `SelfManagedRhoai` select different notebook overlays and default namespaces.
 - **Immutable fields**: `workbenchNamespace` is immutable after initial creation (CEL-enforced). It names the legacy JupyterHub-era notebooks namespace (ensured on reconcile); operand deploy uses the resolved applications namespace.
@@ -41,9 +41,10 @@ internal/gvk/                   Notebook, HardwareProfile, ImageStream, Namespac
 config/                         Kustomize (base, default/OpenShift, certmanager, crd, rbac, manager, operator, webhook, samples)
 charts/operator/                Helm chart (CRD/RBAC synced from generated config/)
 opt/manifests/                  Upstream operand manifests (get_all_manifests.sh; do not hand-edit)
-ci/                             Go directive bump helper script
+opt/manifest-sources.sh         Per-branch operand org/repo/ref map (kept by sync-branches)
+ci/                             Go directive bump + ODH manifest SHA pin helpers
 hack/                           Boilerplate + Helm chart sync/verify scripts
-.github/workflows/              CI (test, build, lint, e2e, manifest-sync, sync-branches, TLS lint, Semgrep)
+.github/workflows/              CI (test, build, lint, e2e, manifests-sync-main/stable, sync-branches, TLS lint, Semgrep)
 .github/dependabot.yml          Dependabot: weekly GHA bumps + Go security updates
 semgrep.yaml                    Semgrep TLS compliance rules
 .gitleaks.toml                  Secret scanning configuration (gitleaks)
@@ -98,7 +99,7 @@ There are no `test-upgrade`, `test-handler`, or `bundle` Makefile targets.
 
 ### Manifests
 - Sources and sync process are documented in [DEPENDENCIES.md](DEPENDENCIES.md) and `opt/README.md`.
-- Do not edit files under `opt/manifests/` directly — they are overwritten by `get_all_manifests.sh` / the daily `manifest-sync` workflow.
+- Do not edit files under `opt/manifests/` directly — they are overwritten by `get_all_manifests.sh` / the manifest-sync workflows. Operand refs live in `opt/manifest-sources.sh` (kept per branch by `sync-branches.yaml`).
 - At render time the controller copies the tree, overlays `RELATED_IMAGE_*` onto existing keys in `params.env` / `params-latest.env` (`imageParamMap` in `internal/controller/imageparams.go`), then merges CR-derived params (`section-title`, `mlflow-enabled`, `gateway-url`), and applies platform-specific overlays.
 - Keep `imageParamMap` in sync when upstream manifests add/rename image keys, and with opendatahub-operator's workbenches module `relatedImages` list (see [DEPENDENCIES.md](DEPENDENCIES.md) "Upgrading Upstream Manifests").
 
@@ -148,9 +149,10 @@ GitHub Actions in `.github/workflows/`:
 - `build.yml` — binary build
 - `lint.yml` — golangci-lint, go vet, kube-linter, helm-lint, chart sync/inventory verify, **verify-manifests** and **verify-generate** (ensure generated code is committed)
 - `e2e.yml` — end-to-end tests on Kind cluster (PRs touching code/Dockerfile)
-- `manifest-sync.yaml` — daily refresh of `opt/manifests/` (opens PR)
+- `manifests-sync-main.yaml` — daily refresh of `opt/manifests/` on `main` (opens PR)
+- `manifests-sync-stable.yaml` — on push to `stable`/`v1.x` (daily on `stable`), commit manifests directly (`bump-shas` on `stable` only; `v1.x` keeps tag pins)
 - `go-directive-updater.yaml` — weekly `go` directive patch bump in `go.mod`
-- `sync-branches.yaml` — manual/workflow_call sync between branches (`main→stable`, `stable→v1.x`); excludes `opt/manifests`
+- `sync-branches.yaml` — manual/workflow_call branch sync (`main→stable`, `stable→v1.x`); keeps target `opt/manifests`, `opt/manifest-sources.sh`, and `.tekton`
 - `tls-lint.yml` — TLS configuration lint (`tls-config-lint`) with SARIF upload
 - `semgrep-tls.yml` — Semgrep TLS compliance rules on PRs
 
@@ -162,7 +164,7 @@ Konflux builds: `.tekton/` PipelineRuns for push and pull request.
 
 - When upstream notebook controller manifests add or rename ClusterRoles, update `config/rbac/rbac_escalate_role.yaml` and run `make chart-sync-rbac`.
 - After changing kubebuilder markers, run `make manifests` and `make chart-sync`.
-- When refreshing upstream manifests, commit `opt/manifests/` together with any `get_all_manifests.sh` source changes.
+- When refreshing upstream manifests, commit `opt/manifests/` together with any `opt/manifest-sources.sh` source changes.
 - See [DEPENDENCIES.md](DEPENDENCIES.md) for Go version, dependency, and upstream manifest upgrade procedures.
 - Review `OWNERS` for approvers and reviewers. Open pull requests against `main`.
 
